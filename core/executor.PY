@@ -3,6 +3,7 @@ import sys
 import traceback
 import processing
 import qgis.core
+import qgis.analysis  # <-- ДОБАВИЛИ МОДУЛЬ АНАЛИТИКИ
 import qgis.PyQt
 from qgis.PyQt.QtWidgets import QApplication
 from qgis.utils import iface
@@ -26,15 +27,19 @@ def extract_code(text: str) -> str:
     return cleaned
 
 def run_pyqgis_code(code: str) -> tuple[bool, str]:
-    # 1. Базовые глобальные переменные
     scope = {
         "iface": iface,
         "processing": processing,
         "PyQt5": qgis.PyQt,
     }
     
-    # 2. МАГИЯ: Автоматически забрасываем ВСЕ тысячи классов QGIS (включая QgsColorRampGradient) в память!
+    # 1. Загружаем все классы ядра
     for key, value in qgis.core.__dict__.items():
+        if not key.startswith("_"):
+            scope[key] = value
+            
+    # 2. Загружаем все классы аналитики (Калькуляторы растров, сетевой анализ и т.д.)
+    for key, value in qgis.analysis.__dict__.items():
         if not key.startswith("_"):
             scope[key] = value
             
