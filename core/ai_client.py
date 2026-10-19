@@ -1,37 +1,60 @@
 import json
+import time
 import urllib.request
 import urllib.error
 
-SYSTEM_PROMPT = """You are an expert PyQGIS developer and GIS analyst.
-Your task is to write working Python code using the PyQGIS API to satisfy the user's request.
+SYSTEM_PROMPT = """You are a helpful PyQGIS expert and GIS assistant for modern QGIS 4 (Qt6).
 
-Rules:
-1. Return ONLY pure Python code wrapped in ```python ... ``` markdown tags.
-2. Do not include any explanations, greetings, or text outside the code block.
-3. Available globals in scope: `iface` (QgisInterface), `QgsProject`, and `processing`.
-4. If creating a temporary layer, add it to the project: QgsProject.instance().addMapLayer(layer)
-5. Ensure CRS compatibility and verify layer validity.
+Communication Rules:
+1. You CAN and SHOULD talk to the user! Answer their GIS questions, explain your approach, or give advice in plain Russian language.
+2. If the user asks to execute an action on the map, write the text explanation, and then MUST wrap the Python code strictly inside a single ```python ... ``` block.
+3. NEVER import PyQt5! This is QGIS 4 running Qt6. Use `from qgis.PyQt import QtCore, QtGui, QtWidgets`.
+4. NEVER import classes from `qgis.core` or `qgis.utils`! They are already pre-loaded globally (e.g., QgsProject, QgsRasterLayer, QgsVectorLayer, QgsGeometry, QgsField, etc.). Just use them directly!
+5. To add a basemap:
+   layer = QgsRasterLayer("type=xyz&url=https://tile.openstreetmap.org/{z}/{x}/{y}.png", "OpenStreetMap", "wms")
+   if layer.isValid(): QgsProject.instance().addMapLayer(layer)
+6. Always add newly created layers to QgsProject.instance().
 """
 
-def request_ai_code(provider: str, api_key: str, prompt: str, project_context: str) -> str:
-    user_content = f"CURRENT QGIS PROJECT CONTEXT:\n{project_context}\n\nUSER REQUEST:\n{prompt}"
-    
+def request_ai_code(provider: str, model_name: str, api_key: str, prompt: str, project_context: str) -> str:
+    start_time = time.time()
+    user_payload = f"Project Context:\n{project_context}\n\nTask to execute:\n{prompt}"
+    clean_model = model_name.replace("models/", "").strip()
+
     # --- 1. GOOGLE GEMINI ---
     if provider == "Google Gemini":
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key={api_key}"
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{clean_model}:generateContent?key={api_key}"
         headers = {"Content-Type": "application/json"}
         payload = {
-            "contents": [{"parts": [{"text": f"{SYSTEM_PROMPT}\n\n{user_content}"}]}],
-            "generationConfig": {"temperature": 0.1}
+            "contents": [
+                {"parts": [{"text": f"{SYSTEM_PROMPT}\n\n{user_payload}"}]}
+            ],
+            "generationConfig": {
+                "temperature": 0.0,
+                "maxOutputTokens": 8192
+            }
         }
         req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers)
         try:
             with urllib.request.urlopen(req, timeout=45) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
-                return data["candidates"][0]["content"]["parts"][0]["text"]
+                elapsed = round(time.time() - start_time, 2)
+                candidates = data.get("candidates", [])
+                if not candidates:
+                    raise RuntimeError("Empty response received from Google Gemini API.")
+                parts = candidates[0].get("content", {}).get("parts", [])
+                code_text = "".join([p.get("text", "") for p in parts if "text" in p and not p.get("thought", False)])
+                if not code_text and parts:
+                    code_text = parts[0].get("text", "")
+                return f"# Generated in {elapsed}s via {clean_model}\n" + code_text
         except urllib.error.HTTPError as e:
-            err_msg = e.read().decode("utf-8")
-            raise RuntimeError(f"Google API Error ({e.code}): {err_msg}")
+            error_body = e.read().decode("utf-8")
+            try:
+                err_json = json.loads(error_body)
+                msg = err_json.get("error", {}).get("message", error_body)
+            except Exception:
+                msg = error_body
+            raise RuntimeError(f"Google API Error ({e.code}): {msg}")
 
     # --- 2. ANTHROPIC CLAUDE ---
     elif provider == "Claude (Anthropic)":
@@ -42,43 +65,44 @@ def request_ai_code(provider: str, api_key: str, prompt: str, project_context: s
             "anthropic-version": "2023-06-01"
         }
         payload = {
-            "model": "claude-3-5-sonnet-latest",
-            "max_tokens": 4096,
+            "model": clean_model,
+            "max_tokens": 2048,
             "system": SYSTEM_PROMPT,
-            "messages": [{"role": "user", "content": user_content}],
-            "temperature": 0.1
+            "messages": [{"role": "user", "content": user_payload}],
+            "temperature": 0.0
         }
         req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers)
         try:
             with urllib.request.urlopen(req, timeout=45) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
-                return data["content"][0]["text"]
+                elapsed = round(time.time() - start_time, 2)
+                return f"# Generated in {elapsed}s via {clean_model}\n" + data["content"][0]["text"]
         except urllib.error.HTTPError as e:
             err_msg = e.read().decode("utf-8")
             raise RuntimeError(f"Claude API Error ({e.code}): {err_msg}")
 
     # --- 3. OPENAI / DEEPSEEK ---
     else:
-        model_name = "deepseek-chat" if provider == "DeepSeek" else "gpt-4o"
         url = "https://api.deepseek.com/chat/completions" if provider == "DeepSeek" else "https://api.openai.com/v1/chat/completions"
-
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {api_key}"
         }
         payload = {
-            "model": model_name,
+            "model": clean_model,
             "messages": [
                 {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user_content}
+                {"role": "user", "content": user_payload}
             ],
-            "temperature": 0.1
+            "temperature": 0.0,
+            "max_tokens": 2048
         }
         req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers)
         try:
-            with urllib.request.urlopen(req, timeout=45) as resp:
+            with urllib.request.urlopen(req, timeout=240) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
-                return data["choices"][0]["message"]["content"]
+                elapsed = round(time.time() - start_time, 2)
+                return f"# Generated in {elapsed}s via {clean_model}\n" + data["choices"][0]["message"]["content"]
         except urllib.error.HTTPError as e:
             err_msg = e.read().decode("utf-8")
             raise RuntimeError(f"{provider} API Error ({e.code}): {err_msg}")
