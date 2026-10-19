@@ -1,0 +1,10 @@
+[general]
+name=AI Copilot
+qgisMinimumVersion=4.0
+qgisMaximumVersion=4.99
+description=Universal AI Assistant to manage QGIS via LLMs
+version=0.1
+author=GIS User
+email=user@example.com
+about=Natural language layer management, geoprocessing, and automated spatial workflows.
+icon=icon.png
