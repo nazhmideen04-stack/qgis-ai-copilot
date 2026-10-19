@@ -36,7 +36,7 @@ def request_ai_code(provider: str, model_name: str, api_key: str, prompt: str, p
         }
         req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers)
         try:
-            with urllib.request.urlopen(req, timeout=45) as resp:
+            with urllib.request.urlopen(req, timeout=300) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
                 elapsed = round(time.time() - start_time, 2)
                 candidates = data.get("candidates", [])
