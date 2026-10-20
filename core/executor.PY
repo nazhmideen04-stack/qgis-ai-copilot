@@ -17,6 +17,8 @@ from qgis.PyQt import QtCore, QtGui, QtWidgets
 from qgis.PyQt.QtWidgets import QApplication
 from qgis.utils import iface
 
+from .log import log_info, log_warning
+
 _SCOPE_CACHE = None
 
 _FENCE_RE = re.compile(r"```[ \t]*(?:python|py|python3)?[ \t]*\r?\n(.*?)```", re.IGNORECASE | re.DOTALL)
@@ -106,14 +108,24 @@ def run_pyqgis_code(code: str) -> tuple:
     except SyntaxError as e:
         return False, (f"Syntax error in the AI code (line {e.lineno}): {e.msg}\n"
                        f"{(e.text or '').rstrip()}\nTry 'Run with AI' again.")
+    log_info("Executing AI-generated code:\n" + code)
     try:
-        exec(compiled, scope)
+        # Выполнение кода — основная функция плагина (как Python-консоль QGIS).
+        # Код выполняется ТОЛЬКО после явного действия пользователя: кнопка «▶ Run Code»
+        # или включённый им «Auto-run» с отдельным подтверждением. Код виден в чате и журнале.
+        exec(compiled, scope)  # nosec B102
     except Exception:
-        return False, traceback.format_exc(limit=6)
+        error = traceback.format_exc(limit=6)
+        log_warning("AI-generated code failed:\n" + error)
+        return False, error
     finally:
-        try:
-            iface.mapCanvas().refresh()
-            QApplication.processEvents()
-        except Exception:
-            pass
+        _refresh_canvas()
     return True, "Code executed successfully."
+
+
+def _refresh_canvas():
+    try:
+        iface.mapCanvas().refresh()
+        QApplication.processEvents()
+    except Exception as e:  # обновление карты не критично, но пишем причину в журнал
+        log_warning(f"Could not refresh the map canvas: {e}")
