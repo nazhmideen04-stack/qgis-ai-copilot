@@ -1,104 +1,119 @@
+"""Извлечение кода из ответа ИИ и его выполнение в подготовленном окружении QGIS."""
+import importlib.util
+import json
+import math
+import os
 import re
 import sys
-import os
-import math
-import json
-import urllib.request
 import traceback
-import processing
+import urllib
 
+import processing
+import qgis.analysis
 import qgis.core
 import qgis.gui
-import qgis.analysis
 import qgis.PyQt
-from qgis.PyQt.QtWidgets import QApplication
 from qgis.PyQt import QtCore, QtGui, QtWidgets
+from qgis.PyQt.QtWidgets import QApplication
 from qgis.utils import iface
 
-# Пытаемся подгрузить модули топологии и графов (если установлены)
-try:
-    import qgis.networkanalysis
-except ImportError:
-    pass
+_SCOPE_CACHE = None
 
-# Пытаемся подгрузить тяжелые растровые библиотеки (Они нужны для NDVI)
-try:
-    from osgeo import gdal, osr, ogr
-except ImportError:
-    pass
+_FENCE_RE = re.compile(r"```[ \t]*(?:python|py|python3)?[ \t]*\r?\n(.*?)```", re.IGNORECASE | re.DOTALL)
+_OPEN_FENCE_RE = re.compile(r"```[ \t]*(?:python|py|python3)[ \t]*\r?\n", re.IGNORECASE)
 
-try:
-    import numpy as np
-except ImportError:
-    pass
 
-# Маскируем PyQt5 для QGIS 4 (Qt6)
-sys.modules["PyQt5"] = qgis.PyQt
-sys.modules["PyQt5.QtCore"] = QtCore
-sys.modules["PyQt5.QtGui"] = QtGui
-sys.modules["PyQt5.QtWidgets"] = QtWidgets
+def _alias_pyqt5():
+    """Если PyQt5 нет (QGIS 4 / Qt6), подменяем его на qgis.PyQt, чтобы старый код ИИ не падал.
+    Если настоящий PyQt5 установлен — ничего не трогаем, чтобы не сломать другие плагины."""
+    if "PyQt5" in sys.modules or importlib.util.find_spec("PyQt5") is not None:
+        return
+    sys.modules["PyQt5"] = qgis.PyQt
+    sys.modules["PyQt5.QtCore"] = QtCore
+    sys.modules["PyQt5.QtGui"] = QtGui
+    sys.modules["PyQt5.QtWidgets"] = QtWidgets
 
-def extract_code(text: str) -> str:
-    match = re.search(r"```[a-zA-Z]*\n(.*?)```", text, re.IGNORECASE | re.DOTALL)
-    raw = match.group(1) if match else text
-    
-    raw = re.sub(r"```[a-zA-Z]*", "", raw, flags=re.IGNORECASE)
-    raw = re.sub(r"```", "", raw)
-    raw = raw.strip()
 
-    cleaned = re.sub(r"\bfrom\s+PyQt5\b", "from qgis.PyQt", raw)
-    cleaned = re.sub(r"\bimport\s+PyQt5\b", "import qgis.PyQt as PyQt5", cleaned)
-    return cleaned
+def _base_scope() -> dict:
+    """Окружение для exec. Строится один раз (тысячи классов — дорого делать каждый раз)."""
+    global _SCOPE_CACHE
+    if _SCOPE_CACHE is not None:
+        return _SCOPE_CACHE
 
-def run_pyqgis_code(code: str) -> tuple[bool, str]:
-    # 1. Загружаем стандартные системные библиотеки Python
-    scope = {
-        "iface": iface,
-        "processing": processing,
-        "PyQt5": qgis.PyQt,
-        "os": os,
-        "sys": sys,
-        "math": math,
-        "json": json,
-        "urllib": urllib
-    }
-    
-    # 2. Добавляем GDAL, OSR и NumPy в память, если они найдены в системе
-    if "osgeo.gdal" in sys.modules:
-        scope["gdal"] = sys.modules["osgeo.gdal"]
-        scope["osr"] = sys.modules["osgeo.osr"]
-        scope["ogr"] = sys.modules["osgeo.ogr"]
-    if "numpy" in sys.modules:
-        scope["np"] = sys.modules["numpy"]
-        scope["numpy"] = sys.modules["numpy"]
-        
-    # 3. АБСОЛЮТНЫЙ РЕЖИМ: Сканируем и загружаем ВСЕ классы из ВСЕХ модулей QGIS и Qt
-    modules_to_load = [
-        qgis.core,
-        qgis.gui,
-        qgis.analysis,
-        QtCore,
-        QtGui,
-        QtWidgets
-    ]
-    
-    if "qgis.networkanalysis" in sys.modules:
-        modules_to_load.append(sys.modules["qgis.networkanalysis"])
-        
-    for mod in modules_to_load:
-        for key, value in mod.__dict__.items():
+    _alias_pyqt5()
+    modules = [qgis.core, qgis.gui, qgis.analysis, QtCore, QtGui, QtWidgets]
+    scope = {}
+    for mod in modules:
+        for key, value in vars(mod).items():
             if not key.startswith("_"):
                 scope[key] = value
-                
+
+    scope.update({
+        "iface": iface, "processing": processing, "os": os, "sys": sys,
+        "math": math, "json": json, "urllib": urllib,
+    })
     try:
-        # Выполняем скрипт в этой всемогущей среде
-        exec(code, scope)
-        iface.mapCanvas().refresh()
-        QApplication.processEvents()
-        return True, "Успешно! Скрипт выполнен."
-        
+        from osgeo import gdal, ogr, osr
+        scope.update({"gdal": gdal, "ogr": ogr, "osr": osr})
+    except ImportError:
+        pass
+    try:
+        import numpy as np
+        scope.update({"np": np, "numpy": np})
+    except ImportError:
+        pass
+
+    _SCOPE_CACHE = scope
+    return scope
+
+
+def _fix_imports(code: str) -> str:
+    code = re.sub(r"\bfrom\s+PyQt[56](\.|\s)", r"from qgis.PyQt\1", code)
+    code = re.sub(r"\bimport\s+PyQt[56]\b(?!\.)", "import qgis.PyQt as PyQt5", code)
+    return code
+
+
+def extract_code(text: str) -> tuple:
+    """Возвращает (code, warning).
+    code == "" — в ответе нет кода (обычный текстовый ответ, выполнять нечего)."""
+    if not text:
+        return "", ""
+    blocks = _FENCE_RE.findall(text)
+    if blocks:
+        code = "\n\n".join(b.strip() for b in blocks if b.strip())
+        return _fix_imports(code), ""
+
+    # Блок открылся, но не закрылся — ответ оборван (лимит токенов / обрыв сети)
+    opened = _OPEN_FENCE_RE.search(text)
+    if opened:
+        partial = text[opened.end():].strip()
+        return "", ("The code block in the answer is incomplete (the response was cut off). "
+                    "Not executed — try again or ask for a shorter script." if partial else "")
+    return "", ""
+
+
+def is_comment_only(code: str) -> bool:
+    lines = [l.strip() for l in code.splitlines() if l.strip()]
+    return all(l.startswith("#") for l in lines)
+
+
+def run_pyqgis_code(code: str) -> tuple:
+    """Выполняет код в главном потоке. Возвращает (success, message)."""
+    scope = dict(_base_scope())
+    scope["__name__"] = "__main__"
+    try:
+        compiled = compile(code, "<ai_generated_code>", "exec")
     except SyntaxError as e:
-        return False, f"Ошибка синтаксиса (ИИ оборвал код).\nДетальнее: {e}\n👉 Нажмите 'Run with AI' еще раз."
-        
+        return False, (f"Syntax error in the AI code (line {e.lineno}): {e.msg}\n"
+                       f"{(e.text or '').rstrip()}\nTry 'Run with AI' again.")
+    try:
+        exec(compiled, scope)
     except Exception:
-        return False, traceback.format_exc()
+        return False, traceback.format_exc(limit=6)
+    finally:
+        try:
+            iface.mapCanvas().refresh()
+            QApplication.processEvents()
+        except Exception:
+            pass
+    return True, "Code executed successfully."
