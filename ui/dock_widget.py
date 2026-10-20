@@ -3,15 +3,15 @@ import urllib.request
 import urllib.error
 from qgis.PyQt.QtWidgets import (QDockWidget, QWidget, QVBoxLayout, QHBoxLayout, 
                                  QComboBox, QLineEdit, QTextEdit, QPushButton, QLabel, 
-                                 QTextBrowser, QApplication, QProgressBar)
+                                 QTextBrowser, QApplication, QProgressBar, QCheckBox)
 from qgis.PyQt.QtCore import QSettings, QTimer, QThread, pyqtSignal
 from qgis.core import QgsSettings, QgsProject
 
 PROVIDERS = ["Ollama (Local)", "OpenAI", "DeepSeek", "Google Gemini", "Claude (Anthropic)"]
 
-# Фоновый рабочий процесс (чтобы QGIS не зависал)
+# Фоновый рабочий процесс
 class AIWorker(QThread):
-    finished_signal = pyqtSignal(str, str) # Отправляет (результат, текст_ошибки)
+    finished_signal = pyqtSignal(str, str)
 
     def __init__(self, provider, model, api_key, prompt, context):
         super().__init__()
@@ -35,10 +35,14 @@ class AICopilotDockWidget(QDockWidget):
         super().__init__("AI Copilot", parent)
         self.settings = QgsSettings()
         
-        # Таймер для отсчета времени
         self.timer = QTimer()
         self.timer.timeout.connect(self.update_timer)
         self.elapsed_time = 0.0
+        
+        # Переменные для памяти и предпросмотра
+        self.chat_history = [] 
+        self.pending_code = ""
+        self.last_prompt = ""
         
         self.init_ui()
 
@@ -63,7 +67,6 @@ class AICopilotDockWidget(QDockWidget):
         self.fetch_models_btn.setFixedWidth(40)
         self.fetch_models_btn.clicked.connect(self.fetch_available_models)
         model_layout.addWidget(self.fetch_models_btn)
-        
         layout.addLayout(model_layout)
 
         layout.addWidget(QLabel("API Key (leave empty for Ollama):"))
@@ -77,8 +80,28 @@ class AICopilotDockWidget(QDockWidget):
         self.log_display.setOpenExternalLinks(True)
         layout.addWidget(self.log_display)
 
+        # Опции выполнения (Auto-run, Run Manual, Clear Memory)
+        options_layout = QHBoxLayout()
+        
+        self.auto_run_cb = QCheckBox("Auto-run code")
+        self.auto_run_cb.setChecked(True)
+        options_layout.addWidget(self.auto_run_cb)
+        
+        self.run_manual_btn = QPushButton("▶ Run Code")
+        self.run_manual_btn.setEnabled(False)
+        self.run_manual_btn.clicked.connect(self.execute_pending_code)
+        options_layout.addWidget(self.run_manual_btn)
+        
+        self.clear_mem_btn = QPushButton("🗑 Clear Memory")
+        self.clear_mem_btn.clicked.connect(self.clear_memory)
+        options_layout.addWidget(self.clear_mem_btn)
+        
+        layout.addLayout(options_layout)
+
         layout.addWidget(QLabel("Your Request:"))
         self.prompt_input = QTextEdit()
+        # Чтобы поле ввода не было слишком огромным
+        self.prompt_input.setMaximumHeight(80) 
         layout.addWidget(self.prompt_input)
 
         self.progress_bar = QProgressBar()
@@ -101,6 +124,10 @@ class AICopilotDockWidget(QDockWidget):
         self.elapsed_time += 0.1
         self.run_button.setText(f"🗘 AI is thinking... {self.elapsed_time:.1f}s")
 
+    def clear_memory(self):
+        self.chat_history.clear()
+        self.append_log("<font color='gray'><i>🗑 Memory cleared. AI forgot previous messages.</i></font>", is_html=True)
+
     def on_api_key_finished(self):
         provider = self.provider_combo.currentText()
         saved_key = self.settings.value(f"ai_copilot/{provider}_api_key", "")
@@ -113,7 +140,6 @@ class AICopilotDockWidget(QDockWidget):
     def update_models(self, provider):
         self.model_combo.clear()
         saved_key = self.settings.value(f"ai_copilot/{provider}_api_key", "")
-        
         self.api_key_input.blockSignals(True)
         self.api_key_input.setText(saved_key)
         self.api_key_input.blockSignals(False)
@@ -200,7 +226,6 @@ class AICopilotDockWidget(QDockWidget):
         provider = self.provider_combo.currentText()
         model = self.model_combo.currentText()
         api_key = self.api_key_input.text()
-        
         self.settings.setValue("ai_copilot/last_provider", provider)
         self.settings.setValue(f"ai_copilot/{provider}_last_model", model)
         if provider != "Ollama (Local)":
@@ -211,7 +236,6 @@ class AICopilotDockWidget(QDockWidget):
         index = self.provider_combo.findText(last_provider)
         if index >= 0:
             self.provider_combo.setCurrentIndex(index)
-            
         last_model = self.settings.value(f"ai_copilot/{last_provider}_last_model", "")
         if last_model:
             self.model_combo.setCurrentText(last_model)
@@ -233,27 +257,53 @@ class AICopilotDockWidget(QDockWidget):
         if not prompt.strip():
             return
             
+        self.last_prompt = prompt
         self.append_log(f"<b>You:</b> {prompt}", is_html=True)
         self.prompt_input.clear()
         
-        # Подготовка интерфейса к ожиданию
         self.run_button.setEnabled(False)
+        self.run_manual_btn.setEnabled(False)
         self.progress_bar.show()
         self.elapsed_time = 0.0
-        self.timer.start(100) # Обновляем каждые 100 мс (0.1 сек)
+        self.timer.start(100)
         
-        # Запускаем ИИ в фоне, чтобы QGIS не "зависал"
-        context = f"Project CRS: {QgsProject.instance().crs().authid()}"
-        self.worker = AIWorker(provider, model, api_key, prompt, context)
+        # --- СБОРКА УМНОГО КОНТЕКСТА ---
+        # 1. Зрение проекта (сканируем слои и поля)
+        layers_info = []
+        for layer in QgsProject.instance().mapLayers().values():
+            if layer.type() == 0: # Vector Layer
+                fields = [f.name() for f in layer.fields()][:5] # Берем первые 5 полей
+                field_str = f" (Fields: {', '.join(fields)})" if fields else ""
+                layers_info.append(f"- '{layer.name()}' [Vector]{field_str}")
+            elif layer.type() == 1: # Raster Layer
+                layers_info.append(f"- '{layer.name()}' [Raster]")
+        
+        layers_text = "\n".join(layers_info) if layers_info else "No layers in project."
+        
+        # 2. Память диалога
+        history_text = ""
+        for item in self.chat_history:
+            history_text += f"User asked: {item['prompt']}\nYou wrote code: {item['code']}\n\n"
+            
+        # Склеиваем всё в невидимый для пользователя контекст
+        smart_context = f"""
+PROJECT CRS: {QgsProject.instance().crs().authid()}
+
+ACTIVE LAYERS IN QGIS:
+{layers_text}
+
+PREVIOUS CHAT HISTORY (Context):
+{history_text if history_text else "No history. This is the first request."}
+"""
+        # Запускаем ИИ
+        self.worker = AIWorker(provider, model, api_key, prompt, smart_context)
         self.worker.finished_signal.connect(self.on_ai_finished)
         self.worker.start()
 
     def on_ai_finished(self, ai_response, error_msg):
-        # Останавливаем таймер и восстанавливаем интерфейс
         self.timer.stop()
         self.progress_bar.hide()
         self.run_button.setEnabled(True)
-        self.run_button.setText("Run with AI")
         self.save_settings()
 
         from qgis_ai_copilot.core import executor
@@ -267,10 +317,38 @@ class AICopilotDockWidget(QDockWidget):
         try:
             code = executor.extract_code(ai_response)
             if code:
-                success, msg = executor.run_pyqgis_code(code)
-                if not success:
-                    self.append_log(f"<font color='red'>✗ Execution error: {msg}</font>", is_html=True)
+                # Обновляем память (храним последние 4 запроса)
+                self.chat_history.append({"prompt": self.last_prompt, "code": code})
+                if len(self.chat_history) > 4:
+                    self.chat_history.pop(0)
+                    
+                self.pending_code = code
+                
+                # Логика предпросмотра
+                if self.auto_run_cb.isChecked():
+                    self.execute_pending_code()
                 else:
-                    self.append_log(f"<font color='green'>✓ Code executed successfully.</font>", is_html=True)
+                    self.append_log("<font color='#d4af37'>ℹ Code generated. Click '▶ Run Code' above to execute.</font>", is_html=True)
+                    self.run_manual_btn.setEnabled(True)
+            else:
+                self.append_log("<font color='orange'>⚠ No Python code found in response.</font>", is_html=True)
+        except Exception as e:
+            self.append_log(f"<font color='red'>✗ Critical error: {e}</font>", is_html=True)
+
+    def execute_pending_code(self):
+        if not self.pending_code:
+            return
+            
+        from qgis_ai_copilot.core import executor
+        
+        self.run_manual_btn.setEnabled(False)
+        self.append_log("<font color='gray'><i>Executing code...</i></font>", is_html=True)
+        
+        try:
+            success, msg = executor.run_pyqgis_code(self.pending_code)
+            if not success:
+                self.append_log(f"<font color='red'>✗ Execution error: {msg}</font>", is_html=True)
+            else:
+                self.append_log(f"<font color='green'>✓ Code executed successfully.</font>", is_html=True)
         except Exception as e:
             self.append_log(f"<font color='red'>✗ Critical error: {e}</font>", is_html=True)
