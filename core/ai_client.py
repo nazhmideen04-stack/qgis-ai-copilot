@@ -1,8 +1,11 @@
 import json
 import urllib.request
 import urllib.error
+import socket
 
-# Жесткие правила для ИИ и разрешение отвечать комментариями (#) при сложных задачах
+# Hard limit for all network connections (prevents infinite hanging)
+socket.setdefaulttimeout(60)
+
 SYSTEM_PROMPT = """You are an expert PyQGIS developer for QGIS 4 (Qt6).
 
 CRITICAL EXECUTION RULES:
@@ -12,8 +15,8 @@ CRITICAL EXECUTION RULES:
 4. NEVER import classes from `qgis.core`, `qgis.gui`, `qgis.analysis`, `osgeo` or `numpy`! They are already pre-loaded globally.
 
 EXCEPTION RULE:
-If the request is too complex, impossible, or requires manual GUI steps (like QuickOSM plugin), DO NOT write broken code. 
-Instead, reply ONLY with Python comments (every line starting with #) explaining the issue in Russian.
+If the request is too complex, impossible, or requires manual GUI steps (like the QuickOSM plugin), DO NOT write broken code. 
+Instead, reply ONLY with Python comments (every line starting with #) explaining the issue in English.
 """
 
 def request_ai_code(provider, model, api_key, prompt, context=""):
@@ -28,12 +31,11 @@ def request_ai_code(provider, model, api_key, prompt, context=""):
                 "contents": [{"parts": [{"text": full_prompt}]}]
             }
             req = urllib.request.Request(url, data=json.dumps(data).encode("utf-8"), headers={"Content-Type": "application/json"})
-            # Жесткий таймаут 60 секунд
             with urllib.request.urlopen(req, timeout=60) as resp:
                 resp_data = json.loads(resp.read().decode("utf-8"))
                 return resp_data["candidates"][0]["content"]["parts"][0]["text"]
                 
-        # --- OLLAMA (Локальная) ---
+        # --- OLLAMA (Local) ---
         elif provider == "Ollama (Local)":
             url = "http://localhost:11434/api/generate"
             data = {
@@ -43,7 +45,7 @@ def request_ai_code(provider, model, api_key, prompt, context=""):
                 "stream": False
             }
             req = urllib.request.Request(url, data=json.dumps(data).encode("utf-8"), headers={"Content-Type": "application/json"})
-            with urllib.request.urlopen(req, timeout=120) as resp: # Локальной модели даем больше времени
+            with urllib.request.urlopen(req, timeout=120) as resp: # Local AI gets more time for "cold start"
                 resp_data = json.loads(resp.read().decode("utf-8"))
                 return resp_data["response"]
                 
@@ -99,13 +101,14 @@ def request_ai_code(provider, model, api_key, prompt, context=""):
                 return resp_data["content"][0]["text"]
                 
         else:
-            raise Exception(f"Провайдер {provider} не поддерживается.")
+            raise Exception(f"Provider {provider} is not supported.")
 
-    # Детальный перехват ошибок, чтобы они выводились в чат, а не ломали плагин
     except urllib.error.HTTPError as e:
         err_msg = e.read().decode("utf-8")
-        raise Exception(f"Ошибка сервера ({e.code}): {err_msg}")
+        raise Exception(f"Server Error ({e.code}): {err_msg}")
     except urllib.error.URLError as e:
-        raise Exception(f"Отсутствует соединение (проверьте интернет или таймаут): {e.reason}")
+        raise Exception(f"Connection failed (check internet or timeout): {e.reason}")
+    except socket.timeout:
+        raise Exception("Request timed out. The server took too long to respond.")
     except Exception as e:
-        raise Exception(f"Внутренняя ошибка API: {str(e)}")
+        raise Exception(f"API Internal Error: {str(e)}")
