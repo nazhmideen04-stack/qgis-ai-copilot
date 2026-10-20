@@ -149,8 +149,9 @@ def _http_error_message(provider, e: urllib.error.HTTPError) -> str:
             detail = err.get("message") or json.dumps(err, ensure_ascii=False)
         elif err:
             detail = str(err)
-    except Exception:
-        pass
+    except (ValueError, AttributeError, TypeError, KeyError, IndexError):
+        # Тело ответа не JSON — показываем его как есть
+        detail = body.strip()
     hint = _HTTP_HINTS.get(e.code, "")
     return f"{provider}: HTTP {e.code}. {hint}\n{detail[:600]}".strip()
 
