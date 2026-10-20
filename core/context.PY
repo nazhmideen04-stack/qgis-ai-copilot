@@ -1,6 +1,8 @@
 """Сбор контекста проекта для промпта. Совместимо с QGIS 4 (без устаревших enum-ов)."""
 from qgis.core import QgsProject, QgsRasterLayer, QgsVectorLayer, QgsWkbTypes
 
+from .log import log_warning
+
 MAX_FIELDS = 15
 MAX_LAYERS = 40
 
@@ -9,7 +11,8 @@ def _iface():
     try:
         from qgis.utils import iface
         return iface
-    except Exception:
+    except ImportError as e:
+        log_warning(f"qgis.utils.iface is unavailable: {e}")
         return None
 
 
@@ -29,8 +32,8 @@ def get_project_context() -> str:
             active = iface.activeLayer()
             if active is not None:
                 lines.append(f"Active layer: '{active.name()}'")
-        except Exception:
-            pass
+        except Exception as e:  # контекст карты необязателен, но причину пишем в журнал
+            log_warning(f"Could not read map canvas context: {e}")
 
     layers = [l for l in project.mapLayers().values() if l.isValid()]
     if not layers:
