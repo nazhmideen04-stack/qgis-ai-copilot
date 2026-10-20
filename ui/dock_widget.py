@@ -2,16 +2,44 @@ import json
 import urllib.request
 import urllib.error
 from qgis.PyQt.QtWidgets import (QDockWidget, QWidget, QVBoxLayout, QHBoxLayout, 
-                                 QComboBox, QLineEdit, QTextEdit, QPushButton, QLabel, QTextBrowser, QApplication)
+                                 QComboBox, QLineEdit, QTextEdit, QPushButton, QLabel, 
+                                 QTextBrowser, QApplication, QProgressBar)
+from qgis.PyQt.QtCore import QSettings, QTimer, QThread, pyqtSignal
 from qgis.core import QgsSettings, QgsProject
 
-# Оставляем только названия самих провайдеров
 PROVIDERS = ["Ollama (Local)", "OpenAI", "DeepSeek", "Google Gemini", "Claude (Anthropic)"]
+
+# Фоновый рабочий процесс (чтобы QGIS не зависал)
+class AIWorker(QThread):
+    finished_signal = pyqtSignal(str, str) # Отправляет (результат, текст_ошибки)
+
+    def __init__(self, provider, model, api_key, prompt, context):
+        super().__init__()
+        self.provider = provider
+        self.model = model
+        self.api_key = api_key
+        self.prompt = prompt
+        self.context = context
+
+    def run(self):
+        from qgis_ai_copilot.core import ai_client
+        try:
+            ai_response = ai_client.request_ai_code(self.provider, self.model, self.api_key, self.prompt, self.context)
+            self.finished_signal.emit(ai_response, "")
+        except Exception as e:
+            self.finished_signal.emit("", str(e))
+
 
 class AICopilotDockWidget(QDockWidget):
     def __init__(self, parent=None):
         super().__init__("AI Copilot", parent)
         self.settings = QgsSettings()
+        
+        # Таймер для отсчета времени
+        self.timer = QTimer()
+        self.timer.timeout.connect(self.update_timer)
+        self.elapsed_time = 0.0
+        
         self.init_ui()
 
     def init_ui(self):
@@ -53,6 +81,12 @@ class AICopilotDockWidget(QDockWidget):
         self.prompt_input = QTextEdit()
         layout.addWidget(self.prompt_input)
 
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 0)
+        self.progress_bar.setTextVisible(False)
+        self.progress_bar.hide()
+        layout.addWidget(self.progress_bar)
+
         self.run_button = QPushButton("Run with AI")
         self.run_button.clicked.connect(self.run_ai_process)
         layout.addWidget(self.run_button)
@@ -62,6 +96,10 @@ class AICopilotDockWidget(QDockWidget):
 
         self.load_settings()
         self.update_models(self.provider_combo.currentText())
+
+    def update_timer(self):
+        self.elapsed_time += 0.1
+        self.run_button.setText(f"🗘 AI is thinking... {self.elapsed_time:.1f}s")
 
     def on_api_key_finished(self):
         provider = self.provider_combo.currentText()
@@ -74,7 +112,6 @@ class AICopilotDockWidget(QDockWidget):
 
     def update_models(self, provider):
         self.model_combo.clear()
-        
         saved_key = self.settings.value(f"ai_copilot/{provider}_api_key", "")
         
         self.api_key_input.blockSignals(True)
@@ -85,13 +122,10 @@ class AICopilotDockWidget(QDockWidget):
             self.api_key_input.setPlaceholderText("API Key not needed for local AI")
             self.api_key_input.setEnabled(False)
             self.fetch_available_models()
-            
         elif provider == "Claude (Anthropic)":
             self.api_key_input.setPlaceholderText("Enter API Key here...")
             self.api_key_input.setEnabled(True)
-            # У Anthropic нет API для получения списка моделей, задаем дефолт
             self.model_combo.addItems(["claude-3-5-sonnet-latest", "claude-3-haiku-20240307"])
-            
         else:
             self.api_key_input.setPlaceholderText("Enter API Key here...")
             self.api_key_input.setEnabled(True)
@@ -106,7 +140,7 @@ class AICopilotDockWidget(QDockWidget):
         models = []
 
         if provider == "Claude (Anthropic)":
-            return # Пропускаем, так как API не поддерживает запрос списка
+            return
 
         try:
             self.fetch_models_btn.setEnabled(False)
@@ -146,11 +180,9 @@ class AICopilotDockWidget(QDockWidget):
             if models:
                 self.model_combo.clear()
                 self.model_combo.addItems(models)
-                
                 last_model = self.settings.value(f"ai_copilot/{provider}_last_model", "")
                 if last_model in models:
                     self.model_combo.setCurrentText(last_model)
-                
                 self.append_log(f"<font color='green'>✓ {provider} models auto-fetched.</font>", True)
                 
         except urllib.error.HTTPError as e:
@@ -204,18 +236,35 @@ class AICopilotDockWidget(QDockWidget):
         self.append_log(f"<b>You:</b> {prompt}", is_html=True)
         self.prompt_input.clear()
         
+        # Подготовка интерфейса к ожиданию
         self.run_button.setEnabled(False)
-        self.run_button.setText("🗘 AI is thinking...")
-        QApplication.processEvents() 
+        self.progress_bar.show()
+        self.elapsed_time = 0.0
+        self.timer.start(100) # Обновляем каждые 100 мс (0.1 сек)
         
-        from qgis_ai_copilot.core import ai_client, executor
+        # Запускаем ИИ в фоне, чтобы QGIS не "зависал"
+        context = f"Project CRS: {QgsProject.instance().crs().authid()}"
+        self.worker = AIWorker(provider, model, api_key, prompt, context)
+        self.worker.finished_signal.connect(self.on_ai_finished)
+        self.worker.start()
+
+    def on_ai_finished(self, ai_response, error_msg):
+        # Останавливаем таймер и восстанавливаем интерфейс
+        self.timer.stop()
+        self.progress_bar.hide()
+        self.run_button.setEnabled(True)
+        self.run_button.setText("Run with AI")
+        self.save_settings()
+
+        from qgis_ai_copilot.core import executor
+
+        if error_msg:
+            self.append_log(f"<font color='red'>✗ Connection error: {error_msg}</font>", is_html=True)
+            return
+
+        self.append_log(f"<b>AI (took {self.elapsed_time:.1f}s):</b><br>{ai_response}", is_html=True)
         
         try:
-            context = f"Project CRS: {QgsProject.instance().crs().authid()}"
-            
-            ai_response = ai_client.request_ai_code(provider, model, api_key, prompt, context)
-            self.append_log(f"<b>AI:</b><br>{ai_response}", is_html=True)
-            
             code = executor.extract_code(ai_response)
             if code:
                 success, msg = executor.run_pyqgis_code(code)
@@ -225,7 +274,3 @@ class AICopilotDockWidget(QDockWidget):
                     self.append_log(f"<font color='green'>✓ Code executed successfully.</font>", is_html=True)
         except Exception as e:
             self.append_log(f"<font color='red'>✗ Critical error: {e}</font>", is_html=True)
-        finally:
-            self.run_button.setEnabled(True)
-            self.run_button.setText("Run with AI")
-            self.save_settings()
