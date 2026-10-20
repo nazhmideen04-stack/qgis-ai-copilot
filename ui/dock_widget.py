@@ -1,169 +1,231 @@
-from qgis.PyQt.QtWidgets import (
-    QDockWidget, QWidget, QVBoxLayout, QTextEdit, 
-    QLineEdit, QPushButton, QComboBox, QLabel, QMessageBox
-)
-from qgis.PyQt.QtCore import Qt, QThread, pyqtSignal
-from qgis.core import QgsSettings
-from ..core.context import get_project_context
-from ..core.ai_client import request_ai_code
-from ..core.executor import extract_code, run_pyqgis_code
+import json
+import urllib.request
+import urllib.error
+from qgis.PyQt.QtWidgets import (QDockWidget, QWidget, QVBoxLayout, QHBoxLayout, 
+                                 QComboBox, QLineEdit, QTextEdit, QPushButton, QLabel, QTextBrowser, QApplication)
+from qgis.core import QgsSettings, QgsProject
 
-PROVIDER_CONFIG = {
-    "Google Gemini": ["gemini-3.8-flash", "gemini-2.0-flash"],
-    "OpenAI": ["gpt-4o-mini", "gpt-4o", "o3-mini"],
-    "DeepSeek": ["deepseek-chat", "deepseek-reasoner"],
-    "Claude (Anthropic)": ["claude-3-5-haiku-latest", "claude-3-5-sonnet-latest"]
-}
-
-class AIWorker(QThread):
-    finished = pyqtSignal(str)
-    error = pyqtSignal(str)
-
-    def __init__(self, provider: str, model_name: str, api_key: str, prompt: str, context: str):
-        super().__init__()
-        self.provider = provider
-        self.model_name = model_name
-        self.api_key = api_key
-        self.prompt = prompt
-        self.context = context
-
-    def run(self):
-        try:
-            raw_answer = request_ai_code(self.provider, self.model_name, self.api_key, self.prompt, self.context)
-            self.finished.emit(raw_answer)
-        except Exception as e:
-            self.error.emit(str(e))
+# Оставляем только названия самих провайдеров
+PROVIDERS = ["Ollama (Local)", "OpenAI", "DeepSeek", "Google Gemini", "Claude (Anthropic)"]
 
 class AICopilotDockWidget(QDockWidget):
     def __init__(self, parent=None):
         super().__init__("AI Copilot", parent)
-        self.setAllowedAreas(Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea)
         self.settings = QgsSettings()
-        self.worker = None
+        self.init_ui()
 
-        container = QWidget()
-        layout = QVBoxLayout(container)
+    def init_ui(self):
+        widget = QWidget()
+        layout = QVBoxLayout()
 
-        # Provider Selector
         layout.addWidget(QLabel("AI Provider:"))
-        self.provider_box = QComboBox()
-        self.provider_box.addItems(list(PROVIDER_CONFIG.keys()))
-        self.provider_box.currentTextChanged.connect(self.on_provider_changed)
-        layout.addWidget(self.provider_box)
+        self.provider_combo = QComboBox()
+        self.provider_combo.addItems(PROVIDERS)
+        self.provider_combo.currentTextChanged.connect(self.update_models)
+        layout.addWidget(self.provider_combo)
 
-        # Model Selector
-        layout.addWidget(QLabel("Model Name (select or type):"))
-        self.model_box = QComboBox()
-        self.model_box.setEditable(True)
-        self.model_box.currentTextChanged.connect(self.save_current_model)
-        layout.addWidget(self.model_box)
+        layout.addWidget(QLabel("Model Name (Auto-fetched):"))
+        model_layout = QHBoxLayout()
+        self.model_combo = QComboBox()
+        self.model_combo.setEditable(True)
+        model_layout.addWidget(self.model_combo)
 
-        # API Key Field
-        layout.addWidget(QLabel("API Key:"))
-        self.key_input = QLineEdit()
-        self.key_input.setEchoMode(QLineEdit.EchoMode.Password)
-        self.key_input.setPlaceholderText("Paste provider API Key here...")
-        self.key_input.textChanged.connect(self.save_current_key)
-        layout.addWidget(self.key_input)
+        self.fetch_models_btn = QPushButton("🗘")
+        self.fetch_models_btn.setToolTip("Refresh list manually")
+        self.fetch_models_btn.setFixedWidth(40)
+        self.fetch_models_btn.clicked.connect(self.fetch_available_models)
+        model_layout.addWidget(self.fetch_models_btn)
+        
+        layout.addLayout(model_layout)
 
-        # Output / Code Area
-        layout.addWidget(QLabel("Chat & Code Log:"))
-        self.log_area = QTextEdit()
-        self.log_area.setReadOnly(True)
-        layout.addWidget(self.log_area)
+        layout.addWidget(QLabel("API Key (leave empty for Ollama):"))
+        self.api_key_input = QLineEdit()
+        self.api_key_input.setEchoMode(QLineEdit.EchoMode.Password)
+        self.api_key_input.editingFinished.connect(self.on_api_key_finished)
+        layout.addWidget(self.api_key_input)
 
-        # Prompt Input
-        layout.addWidget(QLabel("Instruction / Task:"))
+        layout.addWidget(QLabel("Chat / Output:"))
+        self.log_display = QTextBrowser()
+        self.log_display.setOpenExternalLinks(True)
+        layout.addWidget(self.log_display)
+
+        layout.addWidget(QLabel("Your Request:"))
         self.prompt_input = QTextEdit()
-        self.prompt_input.setPlaceholderText("Например: как работает буфер? Или: открой OSM карту...")
-        self.prompt_input.setMaximumHeight(80)
         layout.addWidget(self.prompt_input)
 
-        # Action Button
-        self.run_btn = QPushButton("Run with AI")
-        self.run_btn.setStyleSheet("font-weight: bold; padding: 6px;")
-        self.run_btn.clicked.connect(self.on_submit)
-        layout.addWidget(self.run_btn)
+        self.run_button = QPushButton("Run with AI")
+        self.run_button.clicked.connect(self.run_ai_process)
+        layout.addWidget(self.run_button)
 
-        self.setWidget(container)
-        self.on_provider_changed(self.provider_box.currentText())
+        widget.setLayout(layout)
+        self.setWidget(widget)
 
-    def get_provider_key_prefix(self) -> str:
-        return self.provider_box.currentText().split()[0].lower()
+        self.load_settings()
+        self.update_models(self.provider_combo.currentText())
 
-    def on_provider_changed(self, provider: str):
-        self.model_box.blockSignals(True)
-        self.model_box.clear()
-        models = PROVIDER_CONFIG.get(provider, [])
-        self.model_box.addItems(models)
-        self.model_box.blockSignals(False)
-
-        pref = self.get_provider_key_prefix()
-        saved_key = self.settings.value(f"ai_copilot/key_{pref}", "", type=str)
-        saved_model = self.settings.value(f"ai_copilot/model_{pref}", "", type=str)
-
-        self.key_input.setText(saved_key)
-        if saved_model:
-            self.model_box.setEditText(saved_model)
-        elif models:
-            self.model_box.setCurrentIndex(0)
-
-    def save_current_key(self):
-        pref = self.get_provider_key_prefix()
-        self.settings.setValue(f"ai_copilot/key_{pref}", self.key_input.text().strip())
-
-    def save_current_model(self, model_name: str):
-        pref = self.get_provider_key_prefix()
-        self.settings.setValue(f"ai_copilot/model_{pref}", model_name.strip())
-
-    def on_submit(self):
-        prompt = self.prompt_input.toPlainText().strip()
-        api_key = self.key_input.text().strip()
-        provider = self.provider_box.currentText()
-        model_name = self.model_box.currentText().strip()
-
-        if not prompt or not api_key or not model_name:
-            QMessageBox.warning(self, "Missing Parameters", "Please provide an API Key, Model Name, and prompt task.")
-            return
-
-        self.log_area.append(f"<b>Вы:</b> {prompt}")
-        self.run_btn.setEnabled(False)
-        self.run_btn.setText("AI думает...")
-
-        ctx = get_project_context()
-
-        self.worker = AIWorker(provider, model_name, api_key, prompt, ctx)
-        self.worker.finished.connect(self.on_generation_finished)
-        self.worker.error.connect(self.on_generation_error)
-        self.worker.start()
-
-    def on_generation_finished(self, raw_answer: str):
-        # 1. Форматируем ответ ИИ: текст + стилизованный блок кода
-        escaped_text = raw_answer.replace('<', '&lt;').replace('>', '&gt;')
-        html_text = escaped_text.replace('```python', '<br><pre style="background-color:#f4f4f4; color:#333; padding:10px; border: 1px solid #ddd; border-radius:4px; font-family: monospace;">').replace('```', '</pre><br>').replace('\n', '<br>')
+    def on_api_key_finished(self):
+        provider = self.provider_combo.currentText()
+        saved_key = self.settings.value(f"ai_copilot/{provider}_api_key", "")
+        current_key = self.api_key_input.text().strip()
         
-        # Выводим текстовый ответ ИИ в красивом голубом облачке
-        self.log_area.append(f"<div style='background-color:#e6f7ff; padding:10px; border-left: 4px solid #007acc; margin-bottom: 5px; font-size: 13px;'><b>🤖 AI Copilot:</b><br>{html_text}</div>")
+        if current_key and current_key != saved_key:
+            self.save_settings()
+            self.fetch_available_models()
 
-        # 2. Вытаскиваем сам код для QGIS
-        code = extract_code(raw_answer)
+    def update_models(self, provider):
+        self.model_combo.clear()
         
-        # 3. Выполняем скрипт, ТОЛЬКО если ИИ реально прислал блок кода
-        if "```" in raw_answer:
-            ok, msg = run_pyqgis_code(code)
-            if ok:
-                self.log_area.append("<b style='color:green;'>✅ Скрипт успешно применён к карте!</b><br><br>")
-            else:
-                self.log_area.append(f"<b style='color:red;'>❌ Ошибка выполнения скрипта:</b><br>{msg}<br><br>")
+        saved_key = self.settings.value(f"ai_copilot/{provider}_api_key", "")
+        
+        self.api_key_input.blockSignals(True)
+        self.api_key_input.setText(saved_key)
+        self.api_key_input.blockSignals(False)
+        
+        if provider == "Ollama (Local)":
+            self.api_key_input.setPlaceholderText("API Key not needed for local AI")
+            self.api_key_input.setEnabled(False)
+            self.fetch_available_models()
+            
+        elif provider == "Claude (Anthropic)":
+            self.api_key_input.setPlaceholderText("Enter API Key here...")
+            self.api_key_input.setEnabled(True)
+            # У Anthropic нет API для получения списка моделей, задаем дефолт
+            self.model_combo.addItems(["claude-3-5-sonnet-latest", "claude-3-haiku-20240307"])
+            
         else:
-            # Если кода нет, значит мы просто пообщались с ИИ
-            self.log_area.append("<i style='color:gray;'>Скрипт не обнаружен (только текстовый ответ).</i><br><br>")
+            self.api_key_input.setPlaceholderText("Enter API Key here...")
+            self.api_key_input.setEnabled(True)
+            if saved_key:
+                self.fetch_available_models()
+            else:
+                self.model_combo.addItem("Waiting for API Key...")
 
-        # Разблокируем кнопку
-        self.run_btn.setEnabled(True)
-        self.run_btn.setText("Run with AI")
+    def fetch_available_models(self):
+        provider = self.provider_combo.currentText()
+        api_key = self.api_key_input.text().strip()
+        models = []
 
-    def on_generation_error(self, err_msg: str):
-        self.log_area.append(f"<b style='color:red;'>API Error:</b> {err_msg}<br>")
-        self.run_btn.setEnabled(True)
-        self.run_btn.setText("Run with AI")
+        if provider == "Claude (Anthropic)":
+            return # Пропускаем, так как API не поддерживает запрос списка
+
+        try:
+            self.fetch_models_btn.setEnabled(False)
+            QApplication.processEvents()
+
+            if provider == "Ollama (Local)":
+                req = urllib.request.Request("http://localhost:11434/api/tags")
+                with urllib.request.urlopen(req, timeout=3) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                    models = [m["name"] for m in data.get("models", [])]
+
+            elif provider == "OpenAI":
+                if not api_key: return
+                req = urllib.request.Request("https://api.openai.com/v1/models")
+                req.add_header("Authorization", f"Bearer {api_key}")
+                with urllib.request.urlopen(req, timeout=3) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                    models = [m["id"] for m in data.get("data", []) if "gpt" in m["id"] or "o1" in m["id"]]
+                    models.sort(reverse=True)
+
+            elif provider == "DeepSeek":
+                if not api_key: return
+                req = urllib.request.Request("https://api.deepseek.com/models")
+                req.add_header("Authorization", f"Bearer {api_key}")
+                req.add_header("Accept", "application/json")
+                with urllib.request.urlopen(req, timeout=3) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                    models = [m["id"] for m in data.get("data", [])]
+
+            elif provider == "Google Gemini":
+                if not api_key: return
+                req = urllib.request.Request(f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}")
+                with urllib.request.urlopen(req, timeout=3) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                    models = [m["name"].replace("models/", "") for m in data.get("models", []) if "gemini" in m["name"]]
+
+            if models:
+                self.model_combo.clear()
+                self.model_combo.addItems(models)
+                
+                last_model = self.settings.value(f"ai_copilot/{provider}_last_model", "")
+                if last_model in models:
+                    self.model_combo.setCurrentText(last_model)
+                
+                self.append_log(f"<font color='green'>✓ {provider} models auto-fetched.</font>", True)
+                
+        except urllib.error.HTTPError as e:
+            if e.code == 401:
+                self.model_combo.clear()
+                self.model_combo.addItem("Invalid API Key")
+                self.append_log("<font color='red'>✗ Error: Invalid API Key.</font>", True)
+        except Exception:
+            self.model_combo.clear()
+            self.model_combo.addItem("Connection Error")
+        finally:
+            self.fetch_models_btn.setEnabled(True)
+
+    def save_settings(self):
+        provider = self.provider_combo.currentText()
+        model = self.model_combo.currentText()
+        api_key = self.api_key_input.text()
+        
+        self.settings.setValue("ai_copilot/last_provider", provider)
+        self.settings.setValue(f"ai_copilot/{provider}_last_model", model)
+        if provider != "Ollama (Local)":
+            self.settings.setValue(f"ai_copilot/{provider}_api_key", api_key)
+
+    def load_settings(self):
+        last_provider = self.settings.value("ai_copilot/last_provider", "Google Gemini")
+        index = self.provider_combo.findText(last_provider)
+        if index >= 0:
+            self.provider_combo.setCurrentIndex(index)
+            
+        last_model = self.settings.value(f"ai_copilot/{last_provider}_last_model", "")
+        if last_model:
+            self.model_combo.setCurrentText(last_model)
+
+    def append_log(self, text: str, is_html=False):
+        if is_html:
+            self.log_display.append(text)
+        else:
+            self.log_display.append(text.replace("\n", "<br>"))
+        scrollbar = self.log_display.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
+
+    def run_ai_process(self):
+        provider = self.provider_combo.currentText()
+        model = self.model_combo.currentText()
+        api_key = self.api_key_input.text()
+        prompt = self.prompt_input.toPlainText()
+        
+        if not prompt.strip():
+            return
+            
+        self.append_log(f"<b>You:</b> {prompt}", is_html=True)
+        self.prompt_input.clear()
+        
+        self.run_button.setEnabled(False)
+        self.run_button.setText("🗘 AI is thinking...")
+        QApplication.processEvents() 
+        
+        from qgis_ai_copilot.core import ai_client, executor
+        
+        try:
+            context = f"Project CRS: {QgsProject.instance().crs().authid()}"
+            
+            ai_response = ai_client.request_ai_code(provider, model, api_key, prompt, context)
+            self.append_log(f"<b>AI:</b><br>{ai_response}", is_html=True)
+            
+            code = executor.extract_code(ai_response)
+            if code:
+                success, msg = executor.run_pyqgis_code(code)
+                if not success:
+                    self.append_log(f"<font color='red'>✗ Execution error: {msg}</font>", is_html=True)
+                else:
+                    self.append_log(f"<font color='green'>✓ Code executed successfully.</font>", is_html=True)
+        except Exception as e:
+            self.append_log(f"<font color='red'>✗ Critical error: {e}</font>", is_html=True)
+        finally:
+            self.run_button.setEnabled(True)
+            self.run_button.setText("Run with AI")
+            self.save_settings()
