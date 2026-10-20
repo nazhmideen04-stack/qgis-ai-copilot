@@ -4,7 +4,7 @@ qgisMinimumVersion=4.0
 qgisMaximumVersion=4.99
 supportsQt6=True
 description=Universal AI Assistant to manage QGIS via LLMs
-version=0.2.1
+version=0.8
 author=Aidos Nazhmiden
 email=nazhmideen.04@gmail.com
 about=Natural language layer management, geoprocessing, and automated spatial workflows. Supports Ollama (local), OpenAI, DeepSeek, Google Gemini and Anthropic Claude.
@@ -12,10 +12,72 @@ tracker=https://github.com/nazhmideen04-stack/qgis-ai-copilot/issues
 repository=https://github.com/nazhmideen04-stack/qgis-ai-copilot
 homepage=https://github.com/nazhmideen04-stack/qgis-ai-copilot
 category=Vector
-tags=ai, copilot, llm, automation, python, gemini, chatgpt, claude, ollama
+tags=ai, copilot, plugins, processing, osm, openstreetmap, quickosm, data link, layout, export, llm, automation, python, gemini, chatgpt, claude, ollama
 icon=icon.png
 experimental=True
 changelog=
+    0.8
+    - Fixed: basemap requests ("open Google map") were blocked by the data-link rule and the agent kept retrying
+    - New add_basemap(): Google Maps/Satellite/Hybrid/Terrain, OpenStreetMap, Esri, CartoDB, OpenTopoMap
+    - Reliable coordinates: zoom_to() and add_points() read "lat, lon", degrees-minutes-seconds and decimal commas,
+      fix swapped pairs when obvious and transform to the map CRS; the AI sees the map view in WGS84
+    - The agent stops on errors that need the user (permission, missing link, cancelled dialog) instead of looping;
+      at most 4 automatic steps
+    0.7.1
+    - The AI does only what was asked: no unrequested downloads, styling, layouts or exports
+    - OpenStreetMap download only when the request mentions OSM/OpenStreetMap; otherwise the user is asked first,
+      and a refusal is respected for the whole task (no retries)
+    - Faster and cheaper requests: compact conversation history (about 3x smaller), lighter cached plugin context,
+      low temperature for more precise code (skipped for reasoning models that do not support it)
+    0.7
+    - "Layers for AI": send only the layers you work with in detail (all / selected in the Layers panel /
+      visible / a chosen list); other layers are sent by name only. Large projects use up to ~9x fewer tokens.
+    - The chosen list is saved in the QGIS project
+    0.6.1
+    - Whole plugin in English: interface, messages, code comments and documentation.
+      Only the AI's answers follow the language of the user's request.
+    0.6
+    - Optimised: 17 clear commands instead of 41, system prompt halved (faster and cheaper requests)
+    - Internet data only with the user's link: new "Data link" field; the AI no longer suggests websites;
+      load_from_link() reads the link, finds files/tables/APIs/CKAN datasets, lets the user choose and confirm
+    - Cleaner interface without emoji; coloured live status panel kept
+    0.5
+    - Internet data with user control: the AI searches open data portals (HDX, any CKAN portal), Wikidata,
+      geoBoundaries, World Bank, WorldPop and other APIs, shows the sources with links in a selection dialog,
+      previews a data sample and asks before using it; every new website needs the user's permission
+    - Load any web file or service: GeoJSON, CSV (auto lat/lon), ZIP Shapefile, GPKG, KML, GeoTIFF, WMS, WFS,
+      XYZ, ArcGIS REST; tables from APIs become layers
+    - Automatic print layouts: map, title, legend, scale bar, north arrow, sources and CRS footer
+    - Export to any format: layouts (PDF, PNG, JPG, TIFF, SVG), vector layers (GPKG, SHP, GeoJSON, KML, CSV, XLSX,
+      DXF, GML, FlatGeobuf, GPX, Parquet...), rasters, map images, the project; links to created files in the chat
+    - Styling helpers: graduated, categorized, labels
+    0.4.1
+    - Live status panel: animated indicator, current stage (connecting, model thinking, writing answer,
+      writing code, running code, downloading), elapsed time, characters received and real progress in %
+    - Progress of Processing algorithms and OSM downloads is shown while code runs
+    - The Stop button also cancels running code / Processing algorithms
+    0.4
+    - download_osm() downloads ANY OpenStreetMap data: any tag, several values, several tags at once,
+      all objects in a small area, or inside a named city/district boundary (place="Izmir")
+    - run_alg(): runs any of the 1000+ Processing algorithms with validation of parameter names,
+      layers by name, automatic temporary outputs and loading results to the map
+    - Access to every QGIS button and menu item: list_qgis_actions() / trigger_qgis_action()
+    - Agent mode: multi-step tasks (inspect, then act) and automatic error fixing
+    - Algorithm search understands localized (e.g. Russian) QGIS interface names
+    0.3.1
+    - New download_osm() helper: reliable OpenStreetMap download via QuickOSM (verified parameters)
+      with automatic fallback to the Overpass API when QuickOSM is missing or fails
+    - Fixed: code wrapped in nested code fences was not detected and silently not executed
+    - Code blocks inside lists (indented) and non-Python blocks are handled correctly
+    - "Run Code" button is highlighted when code is waiting to be executed
+    0.3
+    - Works together with your other installed plugins: uses their Processing algorithms
+      (QuickOSM, SAGA, ORS Tools...), opens their dialogs and can access plugin objects
+    - Can enable installed-but-disabled plugins (with confirmation) and open the Plugin Manager
+    - Printed output of executed code is shown in the chat and sent back to the AI
+    - New "Fix with AI" button sends the error back to the AI for a corrected script
+    0.2.2
+    - Code style fixes (flake8 E741, W291/W391)
     0.2.1
     - Security review fixes: no silent exception handling, errors are written to the QGIS message log
     - Explicit confirmation dialog before enabling auto-run of AI-generated code
