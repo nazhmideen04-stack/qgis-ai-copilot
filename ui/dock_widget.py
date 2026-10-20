@@ -1,107 +1,180 @@
-import json
-import urllib.request
-import urllib.error
-from qgis.PyQt.QtWidgets import (QDockWidget, QWidget, QVBoxLayout, QHBoxLayout, 
-                                 QComboBox, QLineEdit, QTextEdit, QPushButton, QLabel, 
-                                 QTextBrowser, QApplication, QProgressBar, QCheckBox)
-from qgis.PyQt.QtCore import QSettings, QTimer, QThread, pyqtSignal
-from qgis.core import QgsSettings, QgsProject
+import html
+from urllib.parse import quote
 
-PROVIDERS = ["Ollama (Local)", "OpenAI", "DeepSeek", "Google Gemini", "Claude (Anthropic)"]
+from qgis.core import QgsSettings
+from qgis.PyQt.QtCore import QThread, QTimer, pyqtSignal
+from qgis.PyQt.QtGui import QFontDatabase, QTextCharFormat, QTextCursor
+from qgis.PyQt.QtWidgets import (QCheckBox, QComboBox, QDockWidget, QHBoxLayout, QLabel, QLineEdit,
+                                 QProgressBar, QPushButton, QTextBrowser, QTextEdit, QVBoxLayout, QWidget)
 
-# Фоновый рабочий процесс
-class AIWorker(QThread):
-    finished_signal = pyqtSignal(str, str)
+# Относительные импорты: плагин работает при любом имени папки
+# (раньше было `qgis_ai_copilot.core`, а папка называлась `qgis-ai-copilot-main` → ImportError)
+from ..core import ai_client
+from ..core.context import get_project_context
 
-    def __init__(self, provider, model, api_key, prompt, context):
+S = "ai_copilot"
+MAX_HISTORY = 4
+MAX_HISTORY_CHARS = 3000
+
+
+def _as_bool(value, default=False):
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in ("true", "1", "yes")
+
+
+def qgis_proxy_url():
+    """Прокси из Настройки → Параметры → Сеть QGIS (если включён)."""
+    s = QgsSettings()
+    if not _as_bool(s.value("proxy/proxyEnabled", False)):
+        return None
+    host = str(s.value("proxy/proxyHost", "") or "").strip()
+    if not host:
+        return None
+    port = str(s.value("proxy/proxyPort", "") or "").strip()
+    user = str(s.value("proxy/proxyUser", "") or "")
+    pwd = str(s.value("proxy/proxyPassword", "") or "")
+    auth = f"{quote(user, safe='')}:{quote(pwd, safe='')}@" if user else ""
+    host = host.split("://", 1)[-1]
+    return f"http://{auth}{host}:{port}" if port else f"http://{auth}{host}"
+
+
+class StreamWorker(QThread):
+    chunk_signal = pyqtSignal(str)
+    finished_signal = pyqtSignal(str, str)  # (полный ответ, ошибка)
+
+    def __init__(self, provider, model, api_key, prompt, context, net):
         super().__init__()
-        self.provider = provider
-        self.model = model
-        self.api_key = api_key
-        self.prompt = prompt
-        self.context = context
+        self.args = (provider, model, api_key, prompt, context)
+        self.net = net
+        self._cancel = False
+
+    def cancel(self):
+        self._cancel = True
 
     def run(self):
-        from qgis_ai_copilot.core import ai_client
+        parts = []
         try:
-            ai_response = ai_client.request_ai_code(self.provider, self.model, self.api_key, self.prompt, self.context)
-            self.finished_signal.emit(ai_response, "")
+            for piece in ai_client.stream_completion(*self.args, net=self.net, cancel=lambda: self._cancel):
+                parts.append(piece)
+                self.chunk_signal.emit(piece)
+            self.finished_signal.emit("".join(parts), "")
+        except ai_client.Cancelled:
+            self.finished_signal.emit("".join(parts), "Stopped by user.")
+        except ai_client.AIError as e:
+            self.finished_signal.emit("".join(parts), str(e))
         except Exception as e:
-            self.finished_signal.emit("", str(e))
+            self.finished_signal.emit("".join(parts), f"Unexpected error: {type(e).__name__}: {e}")
+
+
+class ModelsWorker(QThread):
+    result_signal = pyqtSignal(str, list, str)  # (провайдер, модели, ошибка)
+
+    def __init__(self, provider, api_key, net):
+        super().__init__()
+        self.provider, self.api_key, self.net = provider, api_key, net
+
+    def run(self):
+        try:
+            models = ai_client.list_models(self.provider, self.api_key, self.net)
+            self.result_signal.emit(self.provider, models, "")
+        except ai_client.AIError as e:
+            self.result_signal.emit(self.provider, [], str(e))
+        except Exception as e:
+            self.result_signal.emit(self.provider, [], f"{type(e).__name__}: {e}")
 
 
 class AICopilotDockWidget(QDockWidget):
     def __init__(self, parent=None):
         super().__init__("AI Copilot", parent)
+        self.setObjectName("AICopilotDock")
         self.settings = QgsSettings()
-        
-        self.timer = QTimer()
-        self.timer.timeout.connect(self.update_timer)
-        self.elapsed_time = 0.0
-        
-        # Переменные для памяти и предпросмотра
-        self.chat_history = [] 
+
+        self.worker = None
+        self.models_worker = None
+        self.chat_history = []
         self.pending_code = ""
         self.last_prompt = ""
-        
+        self.elapsed_time = 0.0
+
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.update_timer)
+
+        self.code_format = QTextCharFormat()
+        self.code_format.setFont(QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont))
+
         self.init_ui()
 
+    # ------------------------------------------------------------------ UI
     def init_ui(self):
         widget = QWidget()
-        layout = QVBoxLayout()
+        layout = QVBoxLayout(widget)
 
         layout.addWidget(QLabel("AI Provider:"))
         self.provider_combo = QComboBox()
-        self.provider_combo.addItems(PROVIDERS)
-        self.provider_combo.currentTextChanged.connect(self.update_models)
+        self.provider_combo.addItems(ai_client.PROVIDERS)
         layout.addWidget(self.provider_combo)
 
-        layout.addWidget(QLabel("Model Name (Auto-fetched):"))
+        layout.addWidget(QLabel("Model:"))
         model_layout = QHBoxLayout()
         self.model_combo = QComboBox()
         self.model_combo.setEditable(True)
-        model_layout.addWidget(self.model_combo)
-
+        self.model_combo.setToolTip("Pick from the list or type the model name manually")
+        model_layout.addWidget(self.model_combo, 1)
         self.fetch_models_btn = QPushButton("🗘")
-        self.fetch_models_btn.setToolTip("Refresh list manually")
         self.fetch_models_btn.setFixedWidth(40)
+        self.fetch_models_btn.setToolTip("Load models (also checks the API key)")
         self.fetch_models_btn.clicked.connect(self.fetch_available_models)
         model_layout.addWidget(self.fetch_models_btn)
         layout.addLayout(model_layout)
 
-        layout.addWidget(QLabel("API Key (leave empty for Ollama):"))
+        layout.addWidget(QLabel("API Key:"))
+        key_layout = QHBoxLayout()
         self.api_key_input = QLineEdit()
         self.api_key_input.setEchoMode(QLineEdit.EchoMode.Password)
         self.api_key_input.editingFinished.connect(self.on_api_key_finished)
-        layout.addWidget(self.api_key_input)
+        key_layout.addWidget(self.api_key_input, 1)
+        self.show_key_btn = QPushButton("👁")
+        self.show_key_btn.setFixedWidth(40)
+        self.show_key_btn.setCheckable(True)
+        self.show_key_btn.setToolTip("Show / hide key")
+        self.show_key_btn.toggled.connect(lambda on: self.api_key_input.setEchoMode(
+            QLineEdit.EchoMode.Normal if on else QLineEdit.EchoMode.Password))
+        key_layout.addWidget(self.show_key_btn)
+        layout.addLayout(key_layout)
+
+        self.ssl_cb = QCheckBox("Skip SSL check (only if you get certificate errors)")
+        self.ssl_cb.setChecked(_as_bool(self.settings.value(f"{S}/skip_ssl", False)))
+        self.ssl_cb.toggled.connect(lambda v: self.settings.setValue(f"{S}/skip_ssl", v))
+        layout.addWidget(self.ssl_cb)
 
         layout.addWidget(QLabel("Chat / Output:"))
         self.log_display = QTextBrowser()
         self.log_display.setOpenExternalLinks(True)
-        layout.addWidget(self.log_display)
+        layout.addWidget(self.log_display, 1)
 
-        # Опции выполнения (Auto-run, Run Manual, Clear Memory)
-        options_layout = QHBoxLayout()
-        
+        options = QHBoxLayout()
         self.auto_run_cb = QCheckBox("Auto-run code")
-        self.auto_run_cb.setChecked(True)
-        options_layout.addWidget(self.auto_run_cb)
-        
+        self.auto_run_cb.setToolTip("Execute AI code immediately. Off = review first, then press ▶ Run Code")
+        self.auto_run_cb.setChecked(_as_bool(self.settings.value(f"{S}/auto_run", False)))
+        self.auto_run_cb.toggled.connect(lambda v: self.settings.setValue(f"{S}/auto_run", v))
+        options.addWidget(self.auto_run_cb)
         self.run_manual_btn = QPushButton("▶ Run Code")
         self.run_manual_btn.setEnabled(False)
         self.run_manual_btn.clicked.connect(self.execute_pending_code)
-        options_layout.addWidget(self.run_manual_btn)
-        
-        self.clear_mem_btn = QPushButton("🗑 Clear Memory")
+        options.addWidget(self.run_manual_btn)
+        self.clear_mem_btn = QPushButton("🗑 Clear")
+        self.clear_mem_btn.setToolTip("Clear chat and AI memory")
         self.clear_mem_btn.clicked.connect(self.clear_memory)
-        options_layout.addWidget(self.clear_mem_btn)
-        
-        layout.addLayout(options_layout)
+        options.addWidget(self.clear_mem_btn)
+        layout.addLayout(options)
 
         layout.addWidget(QLabel("Your Request:"))
         self.prompt_input = QTextEdit()
-        # Чтобы поле ввода не было слишком огромным
-        self.prompt_input.setMaximumHeight(80) 
+        self.prompt_input.setMaximumHeight(80)
+        self.prompt_input.setPlaceholderText("e.g. Create a 250 m buffer around selected features")
         layout.addWidget(self.prompt_input)
 
         self.progress_bar = QProgressBar()
@@ -111,244 +184,257 @@ class AICopilotDockWidget(QDockWidget):
         layout.addWidget(self.progress_bar)
 
         self.run_button = QPushButton("Run with AI")
-        self.run_button.clicked.connect(self.run_ai_process)
+        self.run_button.clicked.connect(self.on_run_clicked)
         layout.addWidget(self.run_button)
 
-        widget.setLayout(layout)
         self.setWidget(widget)
 
-        self.load_settings()
-        self.update_models(self.provider_combo.currentText())
+        last_provider = self.settings.value(f"{S}/last_provider", "Google Gemini")
+        idx = self.provider_combo.findText(str(last_provider))
+        if idx >= 0:
+            self.provider_combo.setCurrentIndex(idx)
+        self.provider_combo.currentTextChanged.connect(self.on_provider_changed)
+        self.on_provider_changed(self.provider_combo.currentText())
 
-    def update_timer(self):
-        self.elapsed_time += 0.1
-        self.run_button.setText(f"🗘 AI is thinking... {self.elapsed_time:.1f}s")
+    # ------------------------------------------------------------------ helpers
+    def net(self):
+        return ai_client.Net(verify_ssl=not self.ssl_cb.isChecked(), proxy_url=qgis_proxy_url())
 
-    def clear_memory(self):
-        self.chat_history.clear()
-        self.append_log("<font color='gray'><i>🗑 Memory cleared. AI forgot previous messages.</i></font>", is_html=True)
+    def current_key(self):
+        return ai_client.clean_api_key(self.api_key_input.text())
 
-    def on_api_key_finished(self):
-        provider = self.provider_combo.currentText()
-        saved_key = self.settings.value(f"ai_copilot/{provider}_api_key", "")
-        current_key = self.api_key_input.text().strip()
-        
-        if current_key and current_key != saved_key:
-            self.save_settings()
-            self.fetch_available_models()
+    def is_local(self, provider=None):
+        return (provider or self.provider_combo.currentText()) in ai_client.LOCAL_PROVIDERS
 
-    def update_models(self, provider):
-        self.model_combo.clear()
-        saved_key = self.settings.value(f"ai_copilot/{provider}_api_key", "")
-        self.api_key_input.blockSignals(True)
-        self.api_key_input.setText(saved_key)
-        self.api_key_input.blockSignals(False)
-        
-        if provider == "Ollama (Local)":
-            self.api_key_input.setPlaceholderText("API Key not needed for local AI")
-            self.api_key_input.setEnabled(False)
-            self.fetch_available_models()
-        elif provider == "Claude (Anthropic)":
-            self.api_key_input.setPlaceholderText("Enter API Key here...")
-            self.api_key_input.setEnabled(True)
-            self.model_combo.addItems(["claude-3-5-sonnet-latest", "claude-3-haiku-20240307"])
-        else:
-            self.api_key_input.setPlaceholderText("Enter API Key here...")
-            self.api_key_input.setEnabled(True)
-            if saved_key:
-                self.fetch_available_models()
-            else:
-                self.model_combo.addItem("Waiting for API Key...")
+    def append_html(self, html_text):
+        self.log_display.append(html_text)
+        self._scroll_down()
 
-    def fetch_available_models(self):
-        provider = self.provider_combo.currentText()
-        api_key = self.api_key_input.text().strip()
-        models = []
+    def append_text(self, text, color=None, bold=False):
+        safe = html.escape(text).replace("\n", "<br>")
+        if bold:
+            safe = f"<b>{safe}</b>"
+        if color:
+            safe = f"<span style='color:{color}'>{safe}</span>"
+        self.append_html(safe)
 
-        if provider == "Claude (Anthropic)":
-            return
-
-        try:
-            self.fetch_models_btn.setEnabled(False)
-            QApplication.processEvents()
-
-            if provider == "Ollama (Local)":
-                req = urllib.request.Request("http://localhost:11434/api/tags")
-                with urllib.request.urlopen(req, timeout=3) as resp:
-                    data = json.loads(resp.read().decode("utf-8"))
-                    models = [m["name"] for m in data.get("models", [])]
-
-            elif provider == "OpenAI":
-                if not api_key: return
-                req = urllib.request.Request("https://api.openai.com/v1/models")
-                req.add_header("Authorization", f"Bearer {api_key}")
-                with urllib.request.urlopen(req, timeout=3) as resp:
-                    data = json.loads(resp.read().decode("utf-8"))
-                    models = [m["id"] for m in data.get("data", []) if "gpt" in m["id"] or "o1" in m["id"]]
-                    models.sort(reverse=True)
-
-            elif provider == "DeepSeek":
-                if not api_key: return
-                req = urllib.request.Request("https://api.deepseek.com/models")
-                req.add_header("Authorization", f"Bearer {api_key}")
-                req.add_header("Accept", "application/json")
-                with urllib.request.urlopen(req, timeout=3) as resp:
-                    data = json.loads(resp.read().decode("utf-8"))
-                    models = [m["id"] for m in data.get("data", [])]
-
-            elif provider == "Google Gemini":
-                if not api_key: return
-                req = urllib.request.Request(f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}")
-                with urllib.request.urlopen(req, timeout=3) as resp:
-                    data = json.loads(resp.read().decode("utf-8"))
-                    models = [m["name"].replace("models/", "") for m in data.get("models", []) if "gemini" in m["name"]]
-
-            if models:
-                self.model_combo.clear()
-                self.model_combo.addItems(models)
-                last_model = self.settings.value(f"ai_copilot/{provider}_last_model", "")
-                if last_model in models:
-                    self.model_combo.setCurrentText(last_model)
-                self.append_log(f"<font color='green'>✓ {provider} models auto-fetched.</font>", True)
-                
-        except urllib.error.HTTPError as e:
-            if e.code == 401:
-                self.model_combo.clear()
-                self.model_combo.addItem("Invalid API Key")
-                self.append_log("<font color='red'>✗ Error: Invalid API Key.</font>", True)
-        except Exception:
-            self.model_combo.clear()
-            self.model_combo.addItem("Connection Error")
-        finally:
-            self.fetch_models_btn.setEnabled(True)
+    def _scroll_down(self):
+        bar = self.log_display.verticalScrollBar()
+        bar.setValue(bar.maximum())
 
     def save_settings(self):
         provider = self.provider_combo.currentText()
-        model = self.model_combo.currentText()
-        api_key = self.api_key_input.text()
-        self.settings.setValue("ai_copilot/last_provider", provider)
-        self.settings.setValue(f"ai_copilot/{provider}_last_model", model)
-        if provider != "Ollama (Local)":
-            self.settings.setValue(f"ai_copilot/{provider}_api_key", api_key)
+        self.settings.setValue(f"{S}/last_provider", provider)
+        model = self.model_combo.currentText().strip()
+        if model:
+            self.settings.setValue(f"{S}/{provider}_last_model", model)
+        if not self.is_local(provider):
+            self.settings.setValue(f"{S}/{provider}_api_key", self.current_key())
 
-    def load_settings(self):
-        last_provider = self.settings.value("ai_copilot/last_provider", "Google Gemini")
-        index = self.provider_combo.findText(last_provider)
-        if index >= 0:
-            self.provider_combo.setCurrentIndex(index)
-        last_model = self.settings.value(f"ai_copilot/{last_provider}_last_model", "")
+    # ------------------------------------------------------------------ provider / key / models
+    def on_provider_changed(self, provider):
+        self.settings.setValue(f"{S}/last_provider", provider)
+        saved_key = str(self.settings.value(f"{S}/{provider}_api_key", "") or "")
+        self.api_key_input.blockSignals(True)
+        self.api_key_input.setText(saved_key)
+        self.api_key_input.blockSignals(False)
+
+        local = self.is_local(provider)
+        self.api_key_input.setEnabled(not local)
+        self.show_key_btn.setEnabled(not local)
+        self.api_key_input.setPlaceholderText("Not needed for local AI" if local else "Paste API key here...")
+
+        self.model_combo.clear()
+        last_model = str(self.settings.value(f"{S}/{provider}_last_model", "") or "")
         if last_model:
+            self.model_combo.addItem(last_model)
             self.model_combo.setCurrentText(last_model)
 
-    def append_log(self, text: str, is_html=False):
-        if is_html:
-            self.log_display.append(text)
-        else:
-            self.log_display.append(text.replace("\n", "<br>"))
-        scrollbar = self.log_display.verticalScrollBar()
-        scrollbar.setValue(scrollbar.maximum())
+        if local or saved_key:
+            self.fetch_available_models()
+
+    def on_api_key_finished(self):
+        provider = self.provider_combo.currentText()
+        key = self.current_key()
+        if key != self.api_key_input.text():
+            self.api_key_input.setText(key)  # показываем очищенный ключ
+        saved = str(self.settings.value(f"{S}/{provider}_api_key", "") or "")
+        if key and key != saved:
+            self.save_settings()
+            self.fetch_available_models()
+
+    def fetch_available_models(self):
+        if self.models_worker is not None and self.models_worker.isRunning():
+            return
+        provider = self.provider_combo.currentText()
+        key = self.current_key()
+        if not self.is_local(provider) and not key:
+            self.append_text(f"Enter the API key for {provider} first.", "orange")
+            return
+        self.fetch_models_btn.setEnabled(False)
+        self.fetch_models_btn.setText("…")
+        self.models_worker = ModelsWorker(provider, key, self.net())
+        self.models_worker.result_signal.connect(self.on_models_loaded)
+        self.models_worker.start()
+
+    def on_models_loaded(self, provider, models, error):
+        self.fetch_models_btn.setEnabled(True)
+        self.fetch_models_btn.setText("🗘")
+        if provider != self.provider_combo.currentText():
+            return  # пользователь уже переключил провайдера
+        if error:
+            self.append_text(f"✗ {error}", "red")
+            return
+        if not models:
+            self.append_text(f"{provider}: no models found. Type the model name manually.", "orange")
+            return
+        current = self.model_combo.currentText().strip()
+        last = str(self.settings.value(f"{S}/{provider}_last_model", "") or "")
+        self.model_combo.clear()
+        self.model_combo.addItems(models)
+        for candidate in (current, last):
+            if candidate in models:
+                self.model_combo.setCurrentText(candidate)
+                break
+        self.append_text(f"✓ {provider}: connected, {len(models)} models loaded.", "green")
+
+    # ------------------------------------------------------------------ chat
+    def update_timer(self):
+        self.elapsed_time += 0.1
+        if self.worker is not None and self.worker.isRunning():
+            self.run_button.setText(f"■ Stop  ({self.elapsed_time:.1f}s)")
+
+    def clear_memory(self):
+        self.chat_history.clear()
+        self.pending_code = ""
+        self.run_manual_btn.setEnabled(False)
+        self.log_display.clear()
+        self.append_text("🗑 Memory cleared.", "gray")
+
+    def on_run_clicked(self):
+        if self.worker is not None and self.worker.isRunning():
+            self.worker.cancel()
+            self.run_button.setEnabled(False)
+            self.run_button.setText("Stopping…")
+            return
+        self.run_ai_process()
 
     def run_ai_process(self):
         provider = self.provider_combo.currentText()
-        model = self.model_combo.currentText()
-        api_key = self.api_key_input.text()
-        prompt = self.prompt_input.toPlainText()
-        
-        if not prompt.strip():
+        model = self.model_combo.currentText().strip()
+        key = self.current_key()
+        prompt = self.prompt_input.toPlainText().strip()
+
+        if not prompt:
             return
-            
+        if not self.is_local(provider) and not key:
+            self.append_text(f"Enter the API key for {provider}.", "red")
+            return
+        if not model:
+            self.append_text("Choose a model (click 🗘) or type its name.", "red")
+            return
+
+        self.save_settings()
         self.last_prompt = prompt
-        self.append_log(f"<b>You:</b> {prompt}", is_html=True)
-        self.prompt_input.clear()
-        
-        self.run_button.setEnabled(False)
+        self.pending_code = ""
         self.run_manual_btn.setEnabled(False)
+        self.append_html(f"<br><b>You:</b> {html.escape(prompt).replace(chr(10), '<br>')}")
+        self.append_html("<b>AI:</b>")
+        self.log_display.append("")  # отдельный абзац для потока ответа
+        self.prompt_input.clear()
+
+        try:
+            project_ctx = get_project_context()
+        except Exception as e:
+            project_ctx = f"(project context unavailable: {e})"
+        history = "".join(
+            f"User: {h['prompt']}\nAI answer:\n{h['answer'][:MAX_HISTORY_CHARS]}\n\n" for h in self.chat_history
+        )
+        context = f"PROJECT CONTEXT:\n{project_ctx}"
+        if history:
+            context += f"\n\nPREVIOUS CONVERSATION:\n{history}"
+
         self.progress_bar.show()
         self.elapsed_time = 0.0
         self.timer.start(100)
-        
-        # --- СБОРКА УМНОГО КОНТЕКСТА ---
-        # 1. Зрение проекта (сканируем слои и поля)
-        layers_info = []
-        for layer in QgsProject.instance().mapLayers().values():
-            if layer.type() == 0: # Vector Layer
-                fields = [f.name() for f in layer.fields()][:5] # Берем первые 5 полей
-                field_str = f" (Fields: {', '.join(fields)})" if fields else ""
-                layers_info.append(f"- '{layer.name()}' [Vector]{field_str}")
-            elif layer.type() == 1: # Raster Layer
-                layers_info.append(f"- '{layer.name()}' [Raster]")
-        
-        layers_text = "\n".join(layers_info) if layers_info else "No layers in project."
-        
-        # 2. Память диалога
-        history_text = ""
-        for item in self.chat_history:
-            history_text += f"User asked: {item['prompt']}\nYou wrote code: {item['code']}\n\n"
-            
-        # Склеиваем всё в невидимый для пользователя контекст
-        smart_context = f"""
-PROJECT CRS: {QgsProject.instance().crs().authid()}
+        self.run_button.setText("■ Stop")
 
-ACTIVE LAYERS IN QGIS:
-{layers_text}
-
-PREVIOUS CHAT HISTORY (Context):
-{history_text if history_text else "No history. This is the first request."}
-"""
-        # Запускаем ИИ
-        self.worker = AIWorker(provider, model, api_key, prompt, smart_context)
+        self.worker = StreamWorker(provider, model, key, prompt, context, self.net())
+        self.worker.chunk_signal.connect(self.on_ai_chunk)
         self.worker.finished_signal.connect(self.on_ai_finished)
         self.worker.start()
+
+    def on_ai_chunk(self, chunk):
+        cursor = self.log_display.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        cursor.insertText(chunk, self.code_format)
+        self.log_display.setTextCursor(cursor)
+        self._scroll_down()
 
     def on_ai_finished(self, ai_response, error_msg):
         self.timer.stop()
         self.progress_bar.hide()
         self.run_button.setEnabled(True)
-        self.save_settings()
-
-        from qgis_ai_copilot.core import executor
+        self.run_button.setText("Run with AI")
+        self.append_text(f"(took {self.elapsed_time:.1f}s)", "gray")
 
         if error_msg:
-            self.append_log(f"<font color='red'>✗ Connection error: {error_msg}</font>", is_html=True)
+            self.append_text(f"✗ {error_msg}", "red", bold=True)
+            return  # оборванный/ошибочный ответ никогда не выполняем
+        if not ai_response.strip():
+            self.append_text("The AI returned an empty answer.", "orange")
             return
 
-        self.append_log(f"<b>AI (took {self.elapsed_time:.1f}s):</b><br>{ai_response}", is_html=True)
-        
+        self.chat_history.append({"prompt": self.last_prompt, "answer": ai_response})
+        del self.chat_history[:-MAX_HISTORY]
+
         try:
-            code = executor.extract_code(ai_response)
-            if code:
-                # Обновляем память (храним последние 4 запроса)
-                self.chat_history.append({"prompt": self.last_prompt, "code": code})
-                if len(self.chat_history) > 4:
-                    self.chat_history.pop(0)
-                    
-                self.pending_code = code
-                
-                # Логика предпросмотра
-                if self.auto_run_cb.isChecked():
-                    self.execute_pending_code()
-                else:
-                    self.append_log("<font color='#d4af37'>ℹ Code generated. Click '▶ Run Code' above to execute.</font>", is_html=True)
-                    self.run_manual_btn.setEnabled(True)
-            else:
-                self.append_log("<font color='orange'>⚠ No Python code found in response.</font>", is_html=True)
+            from ..core import executor
+            code, warning = executor.extract_code(ai_response)
         except Exception as e:
-            self.append_log(f"<font color='red'>✗ Critical error: {e}</font>", is_html=True)
+            self.append_text(f"✗ Could not load the executor: {e}", "red")
+            return
+
+        if warning:
+            self.append_text(f"⚠ {warning}", "orange")
+        if not code or executor.is_comment_only(code):
+            return  # обычный текстовый ответ — выполнять нечего
+
+        self.pending_code = code
+        if self.auto_run_cb.isChecked():
+            self.execute_pending_code()
+        else:
+            self.run_manual_btn.setEnabled(True)
+            self.append_text("Code is ready. Review it and press ▶ Run Code.", "#1e6fd9")
 
     def execute_pending_code(self):
         if not self.pending_code:
             return
-            
-        from qgis_ai_copilot.core import executor
-        
         self.run_manual_btn.setEnabled(False)
-        self.append_log("<font color='gray'><i>Executing code...</i></font>", is_html=True)
-        
         try:
+            from ..core import executor
             success, msg = executor.run_pyqgis_code(self.pending_code)
-            if not success:
-                self.append_log(f"<font color='red'>✗ Execution error: {msg}</font>", is_html=True)
-            else:
-                self.append_log(f"<font color='green'>✓ Code executed successfully.</font>", is_html=True)
         except Exception as e:
-            self.append_log(f"<font color='red'>✗ Critical error: {e}</font>", is_html=True)
+            success, msg = False, f"{type(e).__name__}: {e}"
+        if success:
+            self.append_text(f"✓ {msg}", "green")
+        else:
+            self.append_html(
+                "<span style='color:red'><b>✗ Execution error:</b></span>"
+                f"<pre style='color:red'>{html.escape(msg)}</pre>"
+            )
+        self.pending_code = ""
+
+    # ------------------------------------------------------------------ shutdown
+    def shutdown(self):
+        """Корректно останавливает потоки (вызывается при выгрузке плагина)."""
+        self.timer.stop()
+        for w in (self.worker, self.models_worker):
+            if w is not None and w.isRunning():
+                if hasattr(w, "cancel"):
+                    w.cancel()
+                w.wait(3000)
+
+    def closeEvent(self, event):
+        self.save_settings()
+        super().closeEvent(event)
