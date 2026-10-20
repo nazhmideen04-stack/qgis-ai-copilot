@@ -4,7 +4,7 @@ qgisMinimumVersion=4.0
 qgisMaximumVersion=4.99
 supportsQt6=True
 description=Universal AI Assistant to manage QGIS via LLMs
-version=0.2
+version=0.2.1
 author=Aidos Nazhmiden
 email=nazhmideen.04@gmail.com
 about=Natural language layer management, geoprocessing, and automated spatial workflows. Supports Ollama (local), OpenAI, DeepSeek, Google Gemini and Anthropic Claude.
@@ -16,6 +16,10 @@ tags=ai, copilot, llm, automation, python, gemini, chatgpt, claude, ollama
 icon=icon.png
 experimental=True
 changelog=
+    0.2.1
+    - Security review fixes: no silent exception handling, errors are written to the QGIS message log
+    - Explicit confirmation dialog before enabling auto-run of AI-generated code
+    - Executed code is logged in the "AI Copilot" tab of the message log
     0.2
     - Fixed broken API URLs (markdown links inside strings) that made every API key connection fail
     - Fixed absolute imports that broke the plugin when the folder name was not "qgis_ai_copilot"
