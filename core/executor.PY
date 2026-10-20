@@ -95,8 +95,8 @@ def extract_code(text: str) -> tuple:
 
 
 def is_comment_only(code: str) -> bool:
-    lines = [l.strip() for l in code.splitlines() if l.strip()]
-    return all(l.startswith("#") for l in lines)
+    lines = [line.strip() for line in code.splitlines() if line.strip()]
+    return all(line.startswith("#") for line in lines)
 
 
 def run_pyqgis_code(code: str) -> tuple:
