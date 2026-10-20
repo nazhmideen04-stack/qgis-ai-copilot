@@ -2,15 +2,25 @@
 name=AI Copilot
 qgisMinimumVersion=4.0
 qgisMaximumVersion=4.99
+supportsQt6=True
 description=Universal AI Assistant to manage QGIS via LLMs
-version=0.1
+version=0.2
 author=Aidos Nazhmiden
 email=nazhmideen.04@gmail.com
-about=Natural language layer management, geoprocessing, and automated spatial workflows.
+about=Natural language layer management, geoprocessing, and automated spatial workflows. Supports Ollama (local), OpenAI, DeepSeek, Google Gemini and Anthropic Claude.
 tracker=https://github.com/nazhmideen04-stack/qgis-ai-copilot/issues
 repository=https://github.com/nazhmideen04-stack/qgis-ai-copilot
 homepage=https://github.com/nazhmideen04-stack/qgis-ai-copilot
 category=Vector
-tags=ai, copilot, llm, automation, python, gemini, chatgpt
+tags=ai, copilot, llm, automation, python, gemini, chatgpt, claude, ollama
 icon=icon.png
 experimental=True
+changelog=
+    0.2
+    - Fixed broken API URLs (markdown links inside strings) that made every API key connection fail
+    - Fixed absolute imports that broke the plugin when the folder name was not "qgis_ai_copilot"
+    - SSL certificate verification enabled by default (optional switch for problem networks)
+    - Uses QGIS proxy settings instead of disabling proxies globally
+    - Model list for Claude, model loading in a background thread (no UI freeze)
+    - Clear error messages for invalid keys, quotas, unknown models, offline Ollama
+    - Stop button, incomplete answers are never executed, text answers are not executed
