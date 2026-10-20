@@ -5,7 +5,8 @@ from qgis.core import QgsSettings
 from qgis.PyQt.QtCore import QThread, QTimer, pyqtSignal
 from qgis.PyQt.QtGui import QFontDatabase, QTextCharFormat, QTextCursor
 from qgis.PyQt.QtWidgets import (QCheckBox, QComboBox, QDockWidget, QHBoxLayout, QLabel, QLineEdit,
-                                 QProgressBar, QPushButton, QTextBrowser, QTextEdit, QVBoxLayout, QWidget)
+                                 QMessageBox, QProgressBar, QPushButton, QTextBrowser, QTextEdit, QVBoxLayout,
+                                 QWidget)
 
 # Относительные импорты: плагин работает при любом имени папки
 # (раньше было `qgis_ai_copilot.core`, а папка называлась `qgis-ai-copilot-main` → ImportError)
@@ -159,7 +160,7 @@ class AICopilotDockWidget(QDockWidget):
         self.auto_run_cb = QCheckBox("Auto-run code")
         self.auto_run_cb.setToolTip("Execute AI code immediately. Off = review first, then press ▶ Run Code")
         self.auto_run_cb.setChecked(_as_bool(self.settings.value(f"{S}/auto_run", False)))
-        self.auto_run_cb.toggled.connect(lambda v: self.settings.setValue(f"{S}/auto_run", v))
+        self.auto_run_cb.toggled.connect(self.on_auto_run_toggled)
         options.addWidget(self.auto_run_cb)
         self.run_manual_btn = QPushButton("▶ Run Code")
         self.run_manual_btn.setEnabled(False)
@@ -303,6 +304,23 @@ class AICopilotDockWidget(QDockWidget):
         self.elapsed_time += 0.1
         if self.worker is not None and self.worker.isRunning():
             self.run_button.setText(f"■ Stop  ({self.elapsed_time:.1f}s)")
+
+    def on_auto_run_toggled(self, checked):
+        if checked:
+            answer = QMessageBox.warning(
+                self, "Enable auto-run?",
+                "AI-generated Python code will be executed immediately, without review.\n\n"
+                "This code runs inside QGIS with full access to your project and files "
+                "and can modify or delete data.\n\nEnable auto-run anyway?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                self.auto_run_cb.blockSignals(True)
+                self.auto_run_cb.setChecked(False)
+                self.auto_run_cb.blockSignals(False)
+                checked = False
+        self.settings.setValue(f"{S}/auto_run", checked)
 
     def clear_memory(self):
         self.chat_history.clear()
