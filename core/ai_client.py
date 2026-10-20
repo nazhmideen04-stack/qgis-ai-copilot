@@ -1,108 +1,111 @@
 import json
-import time
 import urllib.request
 import urllib.error
 
-SYSTEM_PROMPT = """You are a helpful PyQGIS expert and GIS assistant for modern QGIS 4 (Qt6).
+# Жесткие правила для ИИ и разрешение отвечать комментариями (#) при сложных задачах
+SYSTEM_PROMPT = """You are an expert PyQGIS developer for QGIS 4 (Qt6).
 
-Communication Rules:
-1. You CAN and SHOULD talk to the user! Answer their GIS questions, explain your approach, or give advice. IMPORTANT: You MUST reply in the EXACT SAME LANGUAGE the user used in their prompt (e.g., if the user asks in Turkish, explain in Turkish; if in English, use English).
-2. If the user asks to execute an action on the map, write the text explanation, and then MUST wrap the Python code strictly inside a single ```python ... ``` block.
-3. NEVER import PyQt5! This is QGIS 4 running Qt6. Use `from qgis.PyQt import QtCore, QtGui, QtWidgets`.
-4. NEVER import classes from `qgis.core`, `qgis.gui`, `qgis.analysis`, `osgeo` or `numpy`! They are already pre-loaded globally. Just use them directly!
-5. To add a basemap:
-   layer = QgsRasterLayer("type=xyz&url=https://tile.openstreetmap.org/{z}/{x}/{y}.png", "OpenStreetMap", "wms")
-   if layer.isValid(): QgsProject.instance().addMapLayer(layer)
-6. Always add newly created layers to QgsProject.instance().
+CRITICAL EXECUTION RULES:
+1. OUTPUT ONLY PURE PYTHON CODE. NO EXPLANATIONS OUTSIDE OF CODE. NO ```python TAGS.
+2. ALWAYS include standard imports if needed (import os, random, math).
+3. NEVER import PyQt5! Use `from qgis.PyQt import QtCore, QtGui, QtWidgets`.
+4. NEVER import classes from `qgis.core`, `qgis.gui`, `qgis.analysis`, `osgeo` or `numpy`! They are already pre-loaded globally.
+
+EXCEPTION RULE:
+If the request is too complex, impossible, or requires manual GUI steps (like QuickOSM plugin), DO NOT write broken code. 
+Instead, reply ONLY with Python comments (every line starting with #) explaining the issue in Russian.
 """
 
-def request_ai_code(provider: str, model_name: str, api_key: str, prompt: str, project_context: str) -> str:
-    start_time = time.time()
-    user_payload = f"Project Context:\n{project_context}\n\nTask to execute:\n{prompt}"
-    clean_model = model_name.replace("models/", "").strip()
-
-    # --- 1. GOOGLE GEMINI ---
-    if provider == "Google Gemini":
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{clean_model}:generateContent?key={api_key}"
-        headers = {"Content-Type": "application/json"}
-        payload = {
-            "contents": [
-                {"parts": [{"text": f"{SYSTEM_PROMPT}\n\n{user_payload}"}]}
-            ],
-            "generationConfig": {
-                "temperature": 0.0,
-                "maxOutputTokens": 8192
+def request_ai_code(provider, model, api_key, prompt, context=""):
+    full_prompt = f"{context}\n\nUser Request:\n{prompt}"
+    
+    try:
+        # --- GOOGLE GEMINI ---
+        if provider == "Google Gemini":
+            url = f"[https://generativelanguage.googleapis.com/v1beta/models/](https://generativelanguage.googleapis.com/v1beta/models/){model}:generateContent?key={api_key}"
+            data = {
+                "systemInstruction": {"parts": [{"text": SYSTEM_PROMPT}]},
+                "contents": [{"parts": [{"text": full_prompt}]}]
             }
-        }
-        req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers)
-        try:
-            with urllib.request.urlopen(req, timeout=300) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-                elapsed = round(time.time() - start_time, 2)
-                candidates = data.get("candidates", [])
-                if not candidates:
-                    raise RuntimeError("Empty response received from Google Gemini API.")
-                parts = candidates[0].get("content", {}).get("parts", [])
-                code_text = "".join([p.get("text", "") for p in parts if "text" in p and not p.get("thought", False)])
-                if not code_text and parts:
-                    code_text = parts[0].get("text", "")
-                return f"# Generated in {elapsed}s via {clean_model}\n" + code_text
-        except urllib.error.HTTPError as e:
-            error_body = e.read().decode("utf-8")
-            try:
-                err_json = json.loads(error_body)
-                msg = err_json.get("error", {}).get("message", error_body)
-            except Exception:
-                msg = error_body
-            raise RuntimeError(f"Google API Error ({e.code}): {msg}")
+            req = urllib.request.Request(url, data=json.dumps(data).encode("utf-8"), headers={"Content-Type": "application/json"})
+            # Жесткий таймаут 60 секунд
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                resp_data = json.loads(resp.read().decode("utf-8"))
+                return resp_data["candidates"][0]["content"]["parts"][0]["text"]
+                
+        # --- OLLAMA (Локальная) ---
+        elif provider == "Ollama (Local)":
+            url = "http://localhost:11434/api/generate"
+            data = {
+                "model": model,
+                "system": SYSTEM_PROMPT,
+                "prompt": full_prompt,
+                "stream": False
+            }
+            req = urllib.request.Request(url, data=json.dumps(data).encode("utf-8"), headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=120) as resp: # Локальной модели даем больше времени
+                resp_data = json.loads(resp.read().decode("utf-8"))
+                return resp_data["response"]
+                
+        # --- OPENAI ---
+        elif provider == "OpenAI":
+            url = "[https://api.openai.com/v1/chat/completions](https://api.openai.com/v1/chat/completions)"
+            data = {
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": full_prompt}
+                ]
+            }
+            headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
+            req = urllib.request.Request(url, data=json.dumps(data).encode("utf-8"), headers=headers)
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                resp_data = json.loads(resp.read().decode("utf-8"))
+                return resp_data["choices"][0]["message"]["content"]
+                
+        # --- DEEPSEEK ---
+        elif provider == "DeepSeek":
+            url = "[https://api.deepseek.com/chat/completions](https://api.deepseek.com/chat/completions)"
+            data = {
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": full_prompt}
+                ]
+            }
+            headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
+            req = urllib.request.Request(url, data=json.dumps(data).encode("utf-8"), headers=headers)
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                resp_data = json.loads(resp.read().decode("utf-8"))
+                return resp_data["choices"][0]["message"]["content"]
+                
+        # --- CLAUDE (Anthropic) ---
+        elif provider == "Claude (Anthropic)":
+            url = "[https://api.anthropic.com/v1/messages](https://api.anthropic.com/v1/messages)"
+            data = {
+                "model": model,
+                "max_tokens": 4096,
+                "system": SYSTEM_PROMPT,
+                "messages": [{"role": "user", "content": full_prompt}]
+            }
+            headers = {
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json"
+            }
+            req = urllib.request.Request(url, data=json.dumps(data).encode("utf-8"), headers=headers)
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                resp_data = json.loads(resp.read().decode("utf-8"))
+                return resp_data["content"][0]["text"]
+                
+        else:
+            raise Exception(f"Провайдер {provider} не поддерживается.")
 
-    # --- 2. ANTHROPIC CLAUDE ---
-    elif provider == "Claude (Anthropic)":
-        url = "https://api.anthropic.com/v1/messages"
-        headers = {
-            "Content-Type": "application/json",
-            "x-api-key": api_key,
-            "anthropic-version": "2023-06-01"
-        }
-        payload = {
-            "model": clean_model,
-            "max_tokens": 2048,
-            "system": SYSTEM_PROMPT,
-            "messages": [{"role": "user", "content": user_payload}],
-            "temperature": 0.0
-        }
-        req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers)
-        try:
-            with urllib.request.urlopen(req, timeout=300) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-                elapsed = round(time.time() - start_time, 2)
-                return f"# Generated in {elapsed}s via {clean_model}\n" + data["content"][0]["text"]
-        except urllib.error.HTTPError as e:
-            err_msg = e.read().decode("utf-8")
-            raise RuntimeError(f"Claude API Error ({e.code}): {err_msg}")
-
-    # --- 3. OPENAI / DEEPSEEK ---
-    else:
-        url = "https://api.deepseek.com/chat/completions" if provider == "DeepSeek" else "https://api.openai.com/v1/chat/completions"
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {api_key}"
-        }
-        payload = {
-            "model": clean_model,
-            "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user_payload}
-            ],
-            "temperature": 0.0,
-            "max_tokens": 2048
-        }
-        req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers)
-        try:
-            with urllib.request.urlopen(req, timeout=300) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-                elapsed = round(time.time() - start_time, 2)
-                return f"# Generated in {elapsed}s via {clean_model}\n" + data["choices"][0]["message"]["content"]
-        except urllib.error.HTTPError as e:
-            err_msg = e.read().decode("utf-8")
-            raise RuntimeError(f"{provider} API Error ({e.code}): {err_msg}")
+    # Детальный перехват ошибок, чтобы они выводились в чат, а не ломали плагин
+    except urllib.error.HTTPError as e:
+        err_msg = e.read().decode("utf-8")
+        raise Exception(f"Ошибка сервера ({e.code}): {err_msg}")
+    except urllib.error.URLError as e:
+        raise Exception(f"Отсутствует соединение (проверьте интернет или таймаут): {e.reason}")
+    except Exception as e:
+        raise Exception(f"Внутренняя ошибка API: {str(e)}")
