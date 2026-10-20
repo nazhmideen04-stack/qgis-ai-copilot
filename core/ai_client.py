@@ -1,7 +1,7 @@
 """
-Сетевой клиент для LLM-провайдеров.
-Только стандартная библиотека Python — никаких внешних зависимостей.
-Ошибки поднимаются как AIError с понятным пользователю текстом.
+Network client for LLM providers.
+Python standard library only — no external dependencies.
+Errors are raised as AIError with a user-friendly message.
 """
 import json
 import ssl
@@ -20,44 +20,104 @@ PROVIDER_OLLAMA = "Ollama (Local)"
 PROVIDERS = [PROVIDER_OLLAMA, "OpenAI", "DeepSeek", "Google Gemini", "Claude (Anthropic)"]
 LOCAL_PROVIDERS = {PROVIDER_OLLAMA}
 
+TEMPERATURE = 0.2  # low randomness: precise code, fewer unrequested actions
+
 OPENAI_COMPATIBLE = {
     "OpenAI": "https://api.openai.com/v1",
     "DeepSeek": "https://api.deepseek.com",
 }
 
-SYSTEM_PROMPT = """You are a helpful PyQGIS expert and GIS assistant for QGIS 4 (Qt6).
+SYSTEM_PROMPT = """You are an expert QGIS 4 (Qt6) assistant. You can do anything QGIS can do.
 
-COMMUNICATION RULES:
-1. Reply in the SAME LANGUAGE the user writes in.
-2. If the user only asks a question, answer in plain text and do NOT write code.
-3. If the user asks to do something on the map, give a short explanation, then put ALL
-   executable code in ONE single ```python ... ``` block. Never split it into several blocks.
+ANSWER FORMAT
+- Reply in the user's language. Questions -> plain text, no code.
+- Tasks -> one or two sentences + ALL code in ONE ```python block (never nested or split).
 
-CODE RULES:
-1. NEVER import PyQt5 or PyQt6. Use `from qgis.PyQt import QtCore, QtGui, QtWidgets` if needed.
-2. All classes from qgis.core, qgis.gui, qgis.analysis, QtCore, QtGui, QtWidgets are already
-   available globally, as well as: iface, processing, os, sys, math, json, gdal/ogr/osr and np (if installed).
-3. Qt6 uses scoped enums, e.g. Qt.GlobalColor.red, QMessageBox.StandardButton.Ok.
-4. Always add new layers with QgsProject.instance().addMapLayer(layer) and check layer.isValid().
-5. Use the exact layer names and field names from the project context. Respect the layer CRS;
-   reproject or use a metric CRS before measuring distances/areas when the CRS is geographic.
-6. Prefer processing.run("native:...") algorithms; use "memory:" or "TEMPORARY_OUTPUT" for outputs.
-7. If the task is impossible or requires manual GUI steps, do NOT write code: explain why in text.
+DO ONLY WHAT WAS ASKED
+- Write the minimal code for exactly the requested task. No extra actions the user did not ask for:
+  no downloading data, no styling, no layouts, no exports, no zooming, no new layers "for convenience".
+- Use the existing project layers whenever they can do the job.
+- download_osm ONLY when the user explicitly asks to download/get OpenStreetMap data or map features
+  that are not in the project. Never download data as a side step of another task.
+- Prefer one step. Use [[CONTINUE]] only when you truly cannot write correct code without inspecting first.
+- Simple requests need simple code: "open Google satellite" -> add_basemap("Google Satellite");
+  "go to 38.42, 27.14" -> zoom_to("38.42, 27.14"); "put a point at ..." -> add_points(...).
+
+CODE RULES
+- Never import PyQt5/PyQt6 (use qgis.PyQt). Already available: all qgis.core/gui/analysis classes,
+  QtCore/QtGui/QtWidgets, iface, processing, os, sys, math, json, gdal/ogr/osr, np.
+- Qt6 scoped enums (Qt.GlobalColor.red). Use exact layer/field names from the context.
+- If the context lists WORKING LAYERS, work with them. Other layers are given by name only; if you need
+  their fields, print them first (get_layer(name).fields()) and continue with [[CONTINUE]].
+- Metric CRS for distances/areas when data is in EPSG:4326.
+
+COORDINATES
+- Users write coordinates as "lat, lon" in WGS84 (EPSG:4326) unless they say otherwise.
+- QgsPointXY is (x=lon, y=lat). The map CRS may differ from EPSG:4326: always transform
+  (QgsCoordinateTransform) — or simply use zoom_to / add_points, which parse and transform for you.
+- The context gives the current map view in WGS84 (center, bounds, scale).
+- No try/except that only prints: let errors raise. print() useful results (you will see them).
+
+COMMANDS (already defined, prefer them)
+  run_alg(id, params, load=True, name=None)  any Processing algorithm; validates params, accepts layer names,
+                            adds outputs to the map. Ex: run_alg("native:buffer", {"INPUT": "Roads", "DISTANCE": 100})
+  find_alg(text)            exact id -> prints parameters; otherwise searches algorithms
+  get_layer(name)           layer by name
+  style(layer, field=None, mode="auto", classes=5, method="jenks", ramp=None, labels=None)
+                            graduated/categorized colours by field, labels by field or expression
+  add_basemap(name)         online basemap: "Google Maps", "Google Satellite", "Google Hybrid", "Google Terrain",
+                            "OpenStreetMap", "Esri World Imagery", "Esri World Topo", "CartoDB Positron",
+                            "CartoDB Dark Matter", "OpenTopoMap" (aliases: "google", "satellite", "dark"...)
+  zoom_to(target, scale=None)   "lat, lon" / (lat, lon) / DMS / layer / (west, south, east, north) / place name
+  add_points(points, name="Points")   point layer from "lat, lon" strings, (lat, lon, "label") tuples or dicts
+  find_action(keyword) / run_action(name)    any QGIS or plugin button/menu item (dialogs wait for the user)
+  plugin(name=None)         list plugins / get plugin object (enables or opens the plugin manager if needed)
+  download_osm(key="", value="", tags=None, extent=None, place=None, layer_name=None)
+      OpenStreetMap data: download_osm("amenity","cafe|bar"), download_osm(tags=["building","highway"]),
+      download_osm() = all objects (small area), place="City" = inside its boundary
+  load(source=None, name=None, kind="auto", layer_name="")   local file (None -> file dialog), file URL,
+                            or web service (XYZ/WMS/WFS/ArcGIS REST)
+  load_from_link(url=None)  reads the user's link, finds data on it (files, tables, APIs, CKAN datasets),
+                            lets the user choose, shows a sample, asks to confirm, loads it. Returns layers.
+  fetch(url)                raw API/page response (JSON -> dict/list, else text); layer_from_records(rows, name)
+  ask(question, options=None) / choose(title, items) / confirm(title, description, url, sample)   dialogs
+  create_layout(title, layers=None, extent=None, subtitle="", sources="", page="A4", orientation="landscape")
+                            map + title + legend + scale bar + north arrow + footer, opens the designer
+  export(what, path=None, **opts)   layout -> pdf/png/jpg/tif/svg; layer -> gpkg/shp/geojson/kml/csv/xlsx/dxf/...;
+                            "map" -> image; "project" -> qgz; "all" -> every layer to a folder. No path -> Save dialog.
+
+INTERNET DATA
+- Basemaps are NOT external data: use add_basemap() for any "Google/OSM/satellite map" request (no link needed,
+  no plugins needed).
+- Never suggest, name or link websites or data sources yourself, and never access the internet except
+  add_basemap, zoom_to(place) and download_osm, unless the user gave a link (see USER DATA LINKS).
+- If the task needs external data and there is no link, say briefly that the user should paste a link to the
+  data source into the "Data link" field, or load a local file with load().
+- With a link: call load_from_link(), then join/style/analyse the result. Never invent statistics.
+
+OSM TAGS: food amenity=cafe|restaurant|fast_food|bar ; shop ; health amenity=hospital|clinic|pharmacy ;
+  education amenity=school|university|kindergarten ; roads highway ; railway ; building ; landuse ; natural ;
+  leisure=park ; water natural=water, waterway ; tourism ; amenity=bank|atm|parking|fuel|place_of_worship
+
+MULTI-STEP
+- If you must inspect something first (algorithm parameters, field values, link contents), print it and end the
+  message with a separate line [[CONTINUE]]; you will get the output and continue. Never use it on the last step.
+- If the previous run failed, fix it using the error message instead of repeating the same code.
 """
 
 
 class AIError(Exception):
-    """Ошибка с понятным пользователю сообщением."""
+    """Error with a user-friendly message."""
 
 
 class Cancelled(Exception):
-    """Пользователь остановил генерацию."""
+    """The user stopped the generation."""
 
 
 # --------------------------------------------------------------------------- helpers
 
 def clean_api_key(key) -> str:
-    """Убирает пробелы, кавычки, переносы строк и невидимые символы, попавшие при копировании."""
+    """Removes spaces, quotes, line breaks and invisible characters picked up when copying."""
     key = str(key or "")
     for ch in ("\u200b", "\u200c", "\u200d", "\u2060", "\ufeff"):
         key = key.replace(ch, "")
@@ -84,14 +144,14 @@ def _ssl_context(verify: bool) -> ssl.SSLContext:
         ctx.verify_mode = ssl.CERT_NONE
         return ctx
     try:
-        import certifi  # есть во многих сборках QGIS
+        import certifi  # available in many QGIS builds
         return ssl.create_default_context(cafile=certifi.where())
     except Exception:
         return ssl.create_default_context()
 
 
 class Net:
-    """Настройки сети: проверка SSL и прокси (берётся из настроек QGIS)."""
+    """Network settings: SSL verification and proxy (taken from the QGIS settings)."""
 
     def __init__(self, verify_ssl: bool = True, proxy_url: str = None):
         self.verify_ssl = verify_ssl
@@ -101,8 +161,8 @@ class Net:
         proxies = {}
         if self.proxy_url and not local:
             proxies = {"http": self.proxy_url, "https": self.proxy_url}
-        # Явный ProxyHandler: не тратим время на авто-поиск системного прокси
-        # и не трогаем глобальный urllib (раньше он патчился для всего QGIS).
+        # Explicit ProxyHandler: no time wasted on system proxy auto-detection
+        # and the global urllib is left untouched (it used to be patched for all of QGIS).
         opener = urllib.request.build_opener(
             urllib.request.ProxyHandler(proxies),
             urllib.request.HTTPSHandler(context=_ssl_context(self.verify_ssl)),
@@ -150,7 +210,7 @@ def _http_error_message(provider, e: urllib.error.HTTPError) -> str:
         elif err:
             detail = str(err)
     except (ValueError, AttributeError, TypeError, KeyError, IndexError):
-        # Тело ответа не JSON — показываем его как есть
+        # The response body is not JSON — show it as is
         detail = body.strip()
     hint = _HTTP_HINTS.get(e.code, "")
     return f"{provider}: HTTP {e.code}. {hint}\n{detail[:600]}".strip()
@@ -187,7 +247,7 @@ def _translate_errors(provider):
 
 
 def _sse(resp):
-    """Разбирает поток Server-Sent Events и отдаёт JSON-объекты."""
+    """Parses a Server-Sent Events stream and yields JSON objects."""
     for raw in resp:
         line = raw.decode("utf-8", "replace").strip()
         if not line.startswith("data:"):
@@ -217,8 +277,9 @@ def _gemini(net, model, key, text):
     payload = {
         "systemInstruction": {"parts": [{"text": SYSTEM_PROMPT}]},
         "contents": [{"role": "user", "parts": [{"text": text}]}],
+        "generationConfig": {"temperature": TEMPERATURE},
     }
-    # Ключ передаётся в заголовке, а не в URL (не попадёт в логи/сообщения об ошибках)
+    # The key is sent in a header, not in the URL (keeps it out of logs and error messages)
     with net.open(url, payload, {"x-goog-api-key": key}) as resp:
         for chunk in _sse(resp):
             _stream_error(chunk)
@@ -231,6 +292,12 @@ def _gemini(net, model, key, text):
                         yield part["text"]
 
 
+def _supports_temperature(model):
+    """OpenAI reasoning models (o1/o3/o4, gpt-5…) reject a custom temperature."""
+    m = model.lower()
+    return not (m.startswith(("o1", "o3", "o4", "gpt-5")) or "reasoner" in m)
+
+
 def _openai_compatible(net, base_url, model, key, text):
     payload = {
         "model": model,
@@ -240,6 +307,8 @@ def _openai_compatible(net, base_url, model, key, text):
         ],
         "stream": True,
     }
+    if _supports_temperature(model):
+        payload["temperature"] = TEMPERATURE
     with net.open(f"{base_url}/chat/completions", payload, {"Authorization": f"Bearer {key}"}) as resp:
         for chunk in _sse(resp):
             _stream_error(chunk)
@@ -250,7 +319,7 @@ def _openai_compatible(net, base_url, model, key, text):
 
 
 def _claude_max_tokens(model: str) -> int:
-    # Старые модели Claude 3 (haiku/sonnet/opus) принимают максимум 4096
+    # Older Claude 3 models (haiku/sonnet/opus) accept at most 4096
     m = model.lower()
     if m.startswith("claude-3-") and not m.startswith(("claude-3-5", "claude-3-7")):
         return 4096
@@ -264,6 +333,7 @@ def _claude(net, model, key, text):
         "system": SYSTEM_PROMPT,
         "messages": [{"role": "user", "content": text}],
         "stream": True,
+        "temperature": TEMPERATURE,
     }
     headers = {"x-api-key": key, "anthropic-version": ANTHROPIC_VERSION}
     with net.open("https://api.anthropic.com/v1/messages", payload, headers) as resp:
@@ -278,7 +348,8 @@ def _claude(net, model, key, text):
 
 
 def _ollama(net, model, text):
-    payload = {"model": model, "system": SYSTEM_PROMPT, "prompt": text, "stream": True}
+    payload = {"model": model, "system": SYSTEM_PROMPT, "prompt": text, "stream": True,
+               "options": {"temperature": TEMPERATURE}}
     with net.open(f"{OLLAMA_URL}/api/generate", payload, timeout=TIMEOUT_LOCAL, local=True) as resp:
         for raw in resp:
             raw = raw.strip()
@@ -299,13 +370,13 @@ def _ollama(net, model, text):
 # --------------------------------------------------------------------------- public API
 
 def stream_completion(provider, model, api_key, prompt, context="", net=None, cancel=lambda: False):
-    """Генератор кусочков текста ответа. Бросает AIError или Cancelled."""
+    """Generator of response text chunks. Raises AIError or Cancelled."""
     net = net or Net()
     key = clean_api_key(api_key)
     _check_key(provider, key)
     model = (model or "").strip()
     if not model:
-        raise AIError("No model selected. Click 🗘 to load the list or type the model name.")
+        raise AIError("No model selected. Press 'Refresh' to load the list or type the model name.")
     text = f"{context}\n\nUser Request:\n{prompt}" if context else prompt
 
     if provider == "Google Gemini":
@@ -339,7 +410,7 @@ def _is_openai_chat_model(model_id: str) -> bool:
 
 
 def list_models(provider, api_key, net=None) -> list:
-    """Возвращает список доступных моделей. Заодно проверяет, что ключ рабочий."""
+    """Returns the list of available models. Also verifies that the key works."""
     net = net or Net()
     key = clean_api_key(api_key)
     _check_key(provider, key)

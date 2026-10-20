@@ -1,4 +1,4 @@
-"""Запись в журнал QGIS (Вид → Панели → Журнал сообщений → вкладка «AI Copilot»)."""
+"""Writes to the QGIS log (View → Panels → Log Messages → «AI Copilot» tab)."""
 from qgis.core import Qgis, QgsMessageLog
 
 TAG = "AI Copilot"
