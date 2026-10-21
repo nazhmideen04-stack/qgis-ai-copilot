@@ -4,10 +4,8 @@ Python standard library only — no external dependencies.
 Errors are raised as AIError with a user-friendly message.
 """
 import json
-import ssl
-import urllib.error
+import time
 import urllib.parse
-import urllib.request
 from contextlib import contextmanager
 
 OLLAMA_URL = "http://localhost:11434"
@@ -40,7 +38,7 @@ DO ONLY WHAT WAS ASKED
 - download_osm ONLY when the user explicitly asks to download/get OpenStreetMap data or map features
   that are not in the project. Never download data as a side step of another task.
 - Prefer one step. Use [[CONTINUE]] only when you truly cannot write correct code without inspecting first.
-- Simple requests need simple code: "open Google satellite" -> add_basemap("Google Satellite");
+- Simple requests need simple code: "open a satellite map" -> add_basemap("Esri World Imagery");
   "go to 38.42, 27.14" -> zoom_to("38.42, 27.14"); "put a point at ..." -> add_points(...).
 
 CODE RULES
@@ -69,9 +67,9 @@ COMMANDS (already defined, prefer them)
   new_field(name, kind)     QgsField for any QGIS version (string|int|double|bool|date|datetime)
   style(layer, field=None, mode="auto", classes=5, method="jenks", ramp=None, labels=None)
                             graduated/categorized colours by field, labels by field or expression
-  add_basemap(name)         online basemap: "Google Maps", "Google Satellite", "Google Hybrid", "Google Terrain",
-                            "OpenStreetMap", "Esri World Imagery", "Esri World Topo", "CartoDB Positron",
-                            "CartoDB Dark Matter", "OpenTopoMap" (aliases: "google", "satellite", "dark"...)
+  add_basemap(name)         online basemap: "OpenStreetMap", "Esri World Imagery" (satellite), "Esri World Street Map",
+                            "Esri World Topo", "CartoDB Positron", "CartoDB Dark Matter", "OpenTopoMap".
+                            Google basemaps are not available (Google terms of use): offer the Esri equivalent.
   zoom_to(target, scale=None)   "lat, lon" / (lat, lon) / DMS / layer / (west, south, east, north) / place name
   add_points(points, name="Points")   point layer from "lat, lon" strings, (lat, lon, "label") tuples or dicts
   find_action(keyword) / run_action(name)    any QGIS or plugin button/menu item (dialogs wait for the user)
@@ -100,7 +98,7 @@ USING INSTALLED PLUGINS
 - Never invent plugin algorithm ids, menu paths or method names.
 
 INTERNET DATA
-- Basemaps are NOT external data: use add_basemap() for any "Google/OSM/satellite map" request (no link needed,
+- Basemaps are NOT external data: use add_basemap() for any "OSM/satellite/street map" request (no link needed,
   no plugins needed).
 - Never suggest, name or link websites or data sources yourself, and never access the internet except
   add_basemap, zoom_to(place) and download_osm, unless the user gave a link (see USER DATA LINKS).
@@ -150,44 +148,138 @@ def _check_key(provider: str, key: str):
         )
 
 
-def _ssl_context(verify: bool) -> ssl.SSLContext:
-    if not verify:
-        ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
-        return ctx
-    try:
-        import certifi  # available in many QGIS builds
-        return ssl.create_default_context(cafile=certifi.where())
-    except Exception:
-        return ssl.create_default_context()
+class _HttpError(Exception):
+    def __init__(self, code, body):
+        super().__init__(f"HTTP {code}")
+        self.code, self.body = code, body
+
+
+class _NetworkError(Exception):
+    def __init__(self, message, ssl_error=False):
+        super().__init__(message)
+        self.ssl_error = ssl_error
+
+
+class _QgisResponse:
+    """HTTP request through the QGIS network manager (QGIS proxy, SSL and authentication settings).
+    Used as a context manager; iterating yields the response body line by line as it arrives (streaming)."""
+
+    POLL_MS = 200  # how often a waiting request checks for Stop
+
+    def __init__(self, url, payload, headers, timeout, local, cancel):
+        from qgis.core import QgsNetworkAccessManager
+        from qgis.PyQt.QtCore import QByteArray, QEventLoop, QTimer, QUrl
+        from qgis.PyQt.QtNetwork import QNetworkAccessManager, QNetworkProxy, QNetworkRequest
+
+        if local:  # Ollama on this computer: never through a proxy
+            self._manager = QNetworkAccessManager()
+            self._manager.setProxy(QNetworkProxy(QNetworkProxy.ProxyType.NoProxy))
+        else:
+            self._manager = QgsNetworkAccessManager.instance()
+        request = QNetworkRequest(QUrl(url))
+        request.setAttribute(QNetworkRequest.Attribute.RedirectPolicyAttribute,
+                             QNetworkRequest.RedirectPolicy.NoLessSafeRedirectPolicy)
+        all_headers = {"User-Agent": "QGIS-AI-Copilot"}
+        all_headers.update(headers or {})
+        if payload is not None:
+            all_headers["Content-Type"] = "application/json"
+        for name, value in all_headers.items():
+            request.setRawHeader(name.encode("ascii"), str(value).encode("ascii"))
+        if payload is None:
+            self._reply = self._manager.get(request)
+        else:
+            self._reply = self._manager.post(request, QByteArray(json.dumps(payload).encode("utf-8")))
+
+        self._timeout = float(timeout)
+        self._cancel = cancel or (lambda: False)
+        self._loop = QEventLoop()
+        self._tick = QTimer()
+        self._tick.setInterval(self.POLL_MS)
+        self._tick.timeout.connect(self._loop.quit)
+        for signal in (self._reply.readyRead, self._reply.finished, self._reply.metaDataChanged):
+            signal.connect(self._loop.quit)
+        self._last_activity = time.monotonic()
+
+    # ---------------------------------------------------------------- waiting
+    def _wait(self):
+        """Runs the event loop until data, completion, Stop or timeout."""
+        self._tick.start()
+        self._loop.exec()
+        self._tick.stop()
+        if self._cancel():
+            self._reply.abort()
+            raise Cancelled()
+        if self._reply.bytesAvailable() or self._reply.isFinished():
+            self._last_activity = time.monotonic()
+        elif time.monotonic() - self._last_activity > self._timeout:
+            self._reply.abort()
+            raise TimeoutError()
+
+    def _status(self):
+        from qgis.PyQt.QtNetwork import QNetworkRequest
+        value = self._reply.attribute(QNetworkRequest.Attribute.HttpStatusCodeAttribute)
+        return int(value) if value is not None else None
+
+    def _raise_network_error(self):
+        from qgis.PyQt.QtNetwork import QNetworkReply
+        error = self._reply.error()
+        ssl_error = error == QNetworkReply.NetworkError.SslHandshakeFailedError
+        raise _NetworkError(self._reply.errorString(), ssl_error)
+
+    def _read_all(self):
+        while not self._reply.isFinished():
+            self._wait()
+        return bytes(self._reply.readAll()).decode("utf-8", "replace")
+
+    # ---------------------------------------------------------------- context manager / iteration
+    def __enter__(self):
+        while self._status() is None and not self._reply.isFinished():
+            self._wait()
+        status = self._status()
+        if status is None:  # finished without an HTTP answer: DNS, connection, SSL...
+            self._raise_network_error()
+        if status >= 400:
+            raise _HttpError(status, self._read_all())
+        return self
+
+    def __iter__(self):
+        from qgis.PyQt.QtNetwork import QNetworkReply
+        buffer = b""
+        while True:
+            data = bytes(self._reply.readAll())
+            if data:
+                buffer += data
+                while b"\n" in buffer:
+                    line, buffer = buffer.split(b"\n", 1)
+                    yield line
+            elif self._reply.isFinished():
+                break
+            else:
+                self._wait()
+        if self._reply.error() not in (QNetworkReply.NetworkError.NoError,
+                                       QNetworkReply.NetworkError.OperationCanceledError):
+            self._raise_network_error()
+        if buffer:
+            yield buffer
+
+    def read(self):
+        return self._read_all().encode("utf-8")
+
+    def __exit__(self, *exc):
+        if not self._reply.isFinished():
+            self._reply.abort()
+        self._reply.deleteLater()
+        return False
 
 
 class Net:
-    """Network settings: SSL verification and proxy (taken from the QGIS settings)."""
+    """Network access through QGIS (Settings → Options → Network / Authentication apply automatically)."""
 
-    def __init__(self, verify_ssl: bool = True, proxy_url: str = None):
-        self.verify_ssl = verify_ssl
-        self.proxy_url = proxy_url
+    def __init__(self):
+        self.cancel = None  # set by stream_completion: makes Stop work while waiting for the provider
 
     def open(self, url, payload=None, headers=None, timeout=TIMEOUT_CLOUD, local=False):
-        proxies = {}
-        if self.proxy_url and not local:
-            proxies = {"http": self.proxy_url, "https": self.proxy_url}
-        # Explicit ProxyHandler: no time wasted on system proxy auto-detection
-        # and the global urllib is left untouched (it used to be patched for all of QGIS).
-        opener = urllib.request.build_opener(
-            urllib.request.ProxyHandler(proxies),
-            urllib.request.HTTPSHandler(context=_ssl_context(self.verify_ssl)),
-        )
-        hdrs = {"User-Agent": "QGIS-AI-Copilot/0.2"}
-        hdrs.update(headers or {})
-        body = None
-        if payload is not None:
-            body = json.dumps(payload).encode("utf-8")
-            hdrs["Content-Type"] = "application/json"
-        req = urllib.request.Request(url, data=body, headers=hdrs, method="POST" if body is not None else "GET")
-        return opener.open(req, timeout=timeout)
+        return _QgisResponse(url, payload, headers, timeout, local, self.cancel)
 
     def get_json(self, url, headers=None, local=False):
         with self.open(url, headers=headers, timeout=TIMEOUT_MODELS, local=local) as resp:
@@ -207,12 +299,8 @@ _HTTP_HINTS = {
 }
 
 
-def _http_error_message(provider, e: urllib.error.HTTPError) -> str:
-    try:
-        body = e.read().decode("utf-8", "replace")
-    except Exception:
-        body = ""
-    detail = body.strip()
+def _http_error_message(provider, code, body) -> str:
+    detail = (body or "").strip()
     try:
         data = json.loads(body)
         if isinstance(data, list) and data:
@@ -224,21 +312,19 @@ def _http_error_message(provider, e: urllib.error.HTTPError) -> str:
             detail = str(err)
     except (ValueError, AttributeError, TypeError, KeyError, IndexError):
         # The response body is not JSON — show it as is
-        detail = body.strip()
-    hint = _HTTP_HINTS.get(e.code, "")
-    return f"{provider}: HTTP {e.code}. {hint}\n{detail[:600]}".strip()
+        detail = (body or "").strip()
+    hint = _HTTP_HINTS.get(code, "")
+    return f"{provider}: HTTP {code}. {hint}\n{detail[:600]}".strip()
 
 
-def _url_error_message(provider, e: urllib.error.URLError) -> str:
-    reason = getattr(e, "reason", e)
-    text = str(reason)
-    if isinstance(reason, ssl.SSLError) or "CERTIFICATE_VERIFY_FAILED" in text:
-        return (f"{provider}: SSL certificate check failed ({text}). "
-                "Usually caused by an antivirus/corporate proxy. Enable 'Skip SSL check' in the plugin "
-                "only if you trust your network.")
+def _network_error_message(provider, error) -> str:
+    text = str(error)
+    if getattr(error, "ssl_error", False):
+        return (f"{provider}: SSL certificate check failed ({text}). This is usually caused by an antivirus or a "
+                "corporate proxy. Check the certificates in QGIS: Settings → Options → Authentication.")
     if provider in LOCAL_PROVIDERS:
         return f"Cannot reach Ollama at {OLLAMA_URL} ({text}). Is Ollama running? Try `ollama serve`."
-    return f"{provider}: network error ({text}). Check your internet connection / proxy settings in QGIS."
+    return f"{provider}: network error ({text}). Check the internet connection and Settings → Options → Network."
 
 
 @contextmanager
@@ -247,10 +333,10 @@ def _translate_errors(provider):
         yield
     except (AIError, Cancelled):
         raise
-    except urllib.error.HTTPError as e:
-        raise AIError(_http_error_message(provider, e)) from None
-    except urllib.error.URLError as e:
-        raise AIError(_url_error_message(provider, e)) from None
+    except _HttpError as e:
+        raise AIError(_http_error_message(provider, e.code, e.body)) from None
+    except _NetworkError as e:
+        raise AIError(_network_error_message(provider, e)) from None
     except TimeoutError:
         raise AIError(f"{provider}: the request timed out. Try again or pick a faster model.") from None
     except UnicodeEncodeError:
@@ -385,6 +471,7 @@ def _ollama(net, model, text):
 def stream_completion(provider, model, api_key, prompt, context="", net=None, cancel=lambda: False):
     """Generator of response text chunks. Raises AIError or Cancelled."""
     net = net or Net()
+    net.cancel = cancel
     key = clean_api_key(api_key)
     _check_key(provider, key)
     model = (model or "").strip()

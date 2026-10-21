@@ -1,7 +1,7 @@
 """
 Basemaps and coordinates.
 
-add_basemap("Google Satellite")       — online basemap (no data link needed: tiles are only displayed)
+add_basemap("Esri World Imagery")     — online basemap (no data link needed: tiles are only displayed)
 zoom_to("38.4192, 27.1287")           — zoom to coordinates, a layer, a place name or a bounding box
 add_points([(38.4192, 27.1287, "A")]) — point layer from coordinates
 
@@ -21,38 +21,47 @@ from .progress import report_status
 
 WGS84 = "EPSG:4326"
 
+# name: (XYZ url, max zoom, attribution required by the tile provider)
+OSM_CREDIT = "© OpenStreetMap contributors"
+ESRI_CREDIT = "Tiles © Esri and its data providers"
 BASEMAPS = {
-    "OpenStreetMap": ("https://tile.openstreetmap.org/{z}/{x}/{y}.png", 19),
-    "Google Maps": ("https://mt1.google.com/vt/lyrs=m&x={x}&y={y}&z={z}", 20),
-    "Google Satellite": ("https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}", 20),
-    "Google Hybrid": ("https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}", 20),
-    "Google Terrain": ("https://mt1.google.com/vt/lyrs=p&x={x}&y={y}&z={z}", 20),
+    "OpenStreetMap": ("https://tile.openstreetmap.org/{z}/{x}/{y}.png", 19, OSM_CREDIT),
     "Esri World Imagery": ("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/"
-                           "{z}/{y}/{x}", 19),
+                           "{z}/{y}/{x}", 19, ESRI_CREDIT),
     "Esri World Street Map": ("https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/"
-                              "{z}/{y}/{x}", 19),
+                              "{z}/{y}/{x}", 19, ESRI_CREDIT),
     "Esri World Topo": ("https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/"
-                        "{z}/{y}/{x}", 19),
-    "CartoDB Positron": ("https://a.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png", 20),
-    "CartoDB Dark Matter": ("https://a.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png", 20),
-    "OpenTopoMap": ("https://a.tile.opentopomap.org/{z}/{x}/{y}.png", 17),
+                        "{z}/{y}/{x}", 19, ESRI_CREDIT),
+    "CartoDB Positron": ("https://a.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png", 20, f"{OSM_CREDIT} © CARTO"),
+    "CartoDB Dark Matter": ("https://a.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png", 20, f"{OSM_CREDIT} © CARTO"),
+    "OpenTopoMap": ("https://a.tile.opentopomap.org/{z}/{x}/{y}.png", 17,
+                    f"{OSM_CREDIT}, SRTM | Map style © OpenTopoMap (CC-BY-SA)"),
+}
+# Google tiles are not offered: their terms do not allow direct tile access outside the Google Maps APIs.
+# Requests for Google maps get the closest allowed basemap, and the user is told so.
+GOOGLE_SUBSTITUTES = {
+    "satellite": "Esri World Imagery", "sat": "Esri World Imagery", "hybrid": "Esri World Imagery",
+    "terrain": "Esri World Topo", "road": "Esri World Street Map", "map": "Esri World Street Map",
 }
 ALIASES = {
-    "google": "Google Maps", "google map": "Google Maps", "google maps": "Google Maps", "google road": "Google Maps",
-    "google satellite": "Google Satellite", "google sat": "Google Satellite", "google hybrid": "Google Hybrid",
-    "google terrain": "Google Terrain", "osm": "OpenStreetMap", "openstreetmap": "OpenStreetMap",
+    "osm": "OpenStreetMap", "openstreetmap": "OpenStreetMap",
     "satellite": "Esri World Imagery", "imagery": "Esri World Imagery", "esri": "Esri World Imagery",
     "esri satellite": "Esri World Imagery", "street": "Esri World Street Map", "topo": "OpenTopoMap",
-    "topographic": "OpenTopoMap", "terrain": "Google Terrain", "hybrid": "Google Hybrid",
+    "topographic": "OpenTopoMap", "terrain": "Esri World Topo", "hybrid": "Esri World Imagery",
     "light": "CartoDB Positron", "positron": "CartoDB Positron", "carto": "CartoDB Positron",
     "dark": "CartoDB Dark Matter", "dark matter": "CartoDB Dark Matter",
 }
+ATTRIBUTION_PROPERTY = "ai_copilot/attribution"
 
 
 # --------------------------------------------------------------------------- basemaps
 
 def _resolve_basemap(name):
     key = re.sub(r"\s+", " ", str(name or "OpenStreetMap").strip().lower())
+    if "google" in key:
+        substitute = next((v for k, v in GOOGLE_SUBSTITUTES.items() if k in key), "Esri World Street Map")
+        print(f"Google basemaps are not available (Google terms of use). Using '{substitute}' instead.")
+        return substitute
     for title in BASEMAPS:
         if key == title.lower():
             return title
@@ -69,12 +78,12 @@ def _resolve_basemap(name):
 
 
 def add_basemap(name="OpenStreetMap"):
-    """Adds an online basemap at the bottom of the layer list. Names: OpenStreetMap, Google Maps,
-    Google Satellite, Google Hybrid, Google Terrain, Esri World Imagery, Esri World Street Map, Esri World Topo,
-    CartoDB Positron, CartoDB Dark Matter, OpenTopoMap (aliases like "google", "satellite", "dark" work too).
-    Respect the tile provider's terms of use."""
+    """Adds an online basemap at the bottom of the layer list. Names: OpenStreetMap, Esri World Imagery,
+    Esri World Street Map, Esri World Topo, CartoDB Positron, CartoDB Dark Matter, OpenTopoMap
+    (aliases like "satellite", "topo", "dark" work too). The provider's attribution is stored with the layer
+    and added to print layouts automatically."""
     title = _resolve_basemap(name)
-    url, zmax = BASEMAPS[title]
+    url, zmax, credit = BASEMAPS[title]
     project = QgsProject.instance()
     existing = project.mapLayersByName(title)
     if existing:
@@ -84,10 +93,14 @@ def add_basemap(name="OpenStreetMap"):
     layer = QgsRasterLayer(uri, title, "wms")
     if not layer.isValid():
         raise RuntimeError(f"Could not create the basemap '{title}'. Check the internet connection.")
+    layer.setCustomProperty(ATTRIBUTION_PROPERTY, credit)
+    metadata = layer.metadata()
+    metadata.setRights([credit])
+    layer.setMetadata(metadata)
     project.addMapLayer(layer, False)
     root = project.layerTreeRoot()
     root.insertLayer(len(root.children()), layer)  # bottom, so data layers stay on top
-    print(f"Basemap added: {title}")
+    print(f"Basemap added: {title} ({credit})")
     return layer
 
 

@@ -248,6 +248,11 @@ def create_layout(title, layers=None, extent=None, subtitle="", sources="", page
     footer = f"CRS: {map_crs.authid() or map_crs.description()}  ·  Created: {datetime.date.today():%Y-%m-%d}"
     if sources:
         footer += f"  ·  Data: {sources}"
+    shown = layer_list or [lyr for lyr in project.mapLayers().values() if lyr.isValid()]
+    credits = sorted({str(lyr.customProperty("ai_copilot/attribution")) for lyr in shown
+                      if lyr.customProperty("ai_copilot/attribution")})
+    if credits:
+        footer += "  ·  Basemap: " + "; ".join(credits)
     _add_label(layout, footer, margin, page_h - margin - footer_h + 2, page_w - 2 * margin, 6, 8)
 
     manager.addLayout(layout)

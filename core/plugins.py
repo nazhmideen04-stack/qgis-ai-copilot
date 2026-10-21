@@ -131,8 +131,15 @@ def _plugin_actions():
             if sub is not None and _strip_amp(action.text()).lower() in plugin_titles:
                 _collect_menu(sub, [title, _strip_amp(action.text())], out)
 
-    own_menu = "Plugins > AI Copilot"
-    return [(p, a) for p, a in out if not p.startswith(own_menu) and not p.startswith("Plugins > Manage")]
+    return [(p, a) for p, a in out if not _is_own(p) and not p.startswith("Plugins > Manage")]
+
+
+OWN_TITLE = "AI Copilot"
+
+
+def _is_own(path):
+    """This plugin's own menu entry or button (Vector menu / Vector toolbar) is not offered to the AI."""
+    return OWN_TITLE.lower() in [part.strip().lower() for part in path.split(" > ")]
 
 
 def _toolbar_actions():
@@ -148,7 +155,9 @@ def _toolbar_actions():
             if action.isSeparator() or not text or id(action) in seen:
                 continue
             seen.add(id(action))
-            out.append((f"Toolbar {title} > {text}", action))
+            path = f"Toolbar {title} > {text}"
+            if not _is_own(path):
+                out.append((path, action))
     return out
 
 
