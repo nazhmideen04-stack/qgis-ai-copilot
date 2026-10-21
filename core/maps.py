@@ -13,10 +13,10 @@ import re
 import urllib.parse
 
 import qgis.utils
-from qgis.core import (QgsCoordinateReferenceSystem, QgsCoordinateTransform, QgsFeature, QgsField, QgsGeometry,
+from qgis.core import (QgsCoordinateReferenceSystem, QgsCoordinateTransform, QgsFeature, QgsGeometry,
                        QgsMapLayer, QgsPointXY, QgsProject, QgsRasterLayer, QgsRectangle, QgsVectorLayer)
-from qgis.PyQt.QtCore import QMetaType
 
+from .compat import new_field
 from .progress import report_status
 
 WGS84 = "EPSG:4326"
@@ -198,8 +198,7 @@ def add_points(points, name="Points", zoom=True):
         points = [points]
     layer = QgsVectorLayer(f"Point?crs={WGS84}", name, "memory")
     provider = layer.dataProvider()
-    provider.addAttributes([QgsField("label", QMetaType.Type.QString), QgsField("lat", QMetaType.Type.Double),
-                            QgsField("lon", QMetaType.Type.Double)])
+    provider.addAttributes([new_field("label", "string"), new_field("lat", "double"), new_field("lon", "double")])
     layer.updateFields()
     features = []
     for i, item in enumerate(points, 1):

@@ -22,6 +22,7 @@ from qgis.core import (Qgis, QgsApplication, QgsCoordinateTransform, QgsLayoutEx
 from qgis.PyQt.QtCore import QSize
 from qgis.PyQt.QtGui import QFont
 
+from .compat import distance_km, enum_value, layout_mm, set_label_text, set_rect_null
 from .log import log_info
 from .progress import register_output, report_status, run_processing
 from .qgis_tools import get_layer
@@ -39,7 +40,7 @@ VECTOR_FORMATS = {"gpkg", "shp", "geojson", "json", "kml", "csv", "xlsx", "ods",
 
 
 def _mm():
-    return Qgis.LayoutUnit.Millimeters
+    return layout_mm()
 
 
 def _point(x, y):
@@ -86,7 +87,10 @@ def _text_format(size, bold=False):
 def _add_label(layout, text, x, y, w, h, size, bold=False):
     label = QgsLayoutItemLabel(layout)
     label.setText(text)
-    label.setTextFormat(_text_format(size, bold))
+    font = QFont()
+    font.setBold(bold)
+    font.setPointSizeF(size)
+    set_label_text(label, _text_format(size, bold), font)
     layout.addLayoutItem(label)
     label.attemptMove(_point(x, y))
     label.attemptResize(_size(w, h))
@@ -119,7 +123,7 @@ def _extent_for(extent, layers):
         sources = layers
     if sources:
         rect = QgsRectangle()
-        rect.setNull()
+        set_rect_null(rect)
         for layer in sources:
             transform = QgsCoordinateTransform(layer.crs(), project.crs(), project)
             rect.combineExtentWith(transform.transformBoundingBox(layer.extent()))
@@ -148,8 +152,9 @@ def create_layout(title, layers=None, extent=None, subtitle="", sources="", page
     layout = QgsPrintLayout(project)
     layout.initializeDefaults()
     layout.setName(name)
-    orient = (QgsLayoutItemPage.Orientation.Portrait if str(orientation).lower().startswith("p")
-              else QgsLayoutItemPage.Orientation.Landscape)
+    portrait = enum_value(QgsLayoutItemPage, "Orientation", "Portrait")
+    landscape = enum_value(QgsLayoutItemPage, "Orientation", "Landscape")
+    orient = portrait if str(orientation).lower().startswith("p") else landscape
     page_name = page if page in PAGE_SIZES else "A4"
     page_item = layout.pageCollection().page(0)
     page_item.setPageSize(page_name, orient)
@@ -217,7 +222,7 @@ def create_layout(title, layers=None, extent=None, subtitle="", sources="", page
         bar = QgsLayoutItemScaleBar(layout)
         bar.setStyle("Single Box")
         bar.setLinkedMap(map_item)
-        bar.applyDefaultSize(Qgis.DistanceUnit.Kilometers)
+        bar.applyDefaultSize(distance_km())
         bar.setUnitLabel("km")
         layout.addLayoutItem(bar)
         bar.attemptMove(_point(map_x + 4, map_y + map_h - 16))
@@ -230,7 +235,7 @@ def create_layout(title, layers=None, extent=None, subtitle="", sources="", page
 
     manager.addLayout(layout)
     log_info(f"Layout created: {name}")
-    orient_name = "portrait" if orient == QgsLayoutItemPage.Orientation.Portrait else "landscape"
+    orient_name = "portrait" if orient == portrait else "landscape"
     print(f"Layout '{name}' created ({page_name} {orient_name}, {len(layer_list) or 'all visible'} layer(s)).")
     if open_designer and qgis.utils.iface is not None:
         qgis.utils.iface.openLayoutDesigner(layout)
@@ -264,7 +269,7 @@ def export_layout(layout, path=None, dpi=300):
         settings = QgsLayoutExporter.ImageExportSettings()
         settings.dpi = dpi
         result = exporter.exportToImage(path, settings)
-    if result != QgsLayoutExporter.ExportResult.Success:
+    if result != enum_value(QgsLayoutExporter, "ExportResult", "Success"):
         raise RuntimeError(f"Layout export failed ({result}): {exporter.errorMessage() or path}")
     register_output(path)
     print(f"Layout exported → {path}")

@@ -8,10 +8,11 @@ import os
 import re
 import urllib.parse
 
-from qgis.core import (QgsFeature, QgsField, QgsFields, QgsGeometry, QgsPointXY, QgsProcessingUtils, QgsProject,
+from qgis.core import (QgsFeature, QgsFields, QgsGeometry, QgsPointXY, QgsProcessingUtils, QgsProject,
                        QgsRasterLayer, QgsSettings, QgsVectorLayer)
 from qgis.PyQt.QtCore import QUrl
 
+from .compat import new_field
 from .log import log_info
 from .progress import report_status, run_processing
 
@@ -166,17 +167,16 @@ def load_from_url(url, name=None, purpose="", add=True):
 # --------------------------------------------------------------------------- records → layer
 
 def _field_for(name, values):
-    from qgis.PyQt.QtCore import QMetaType
     present = [v for v in values if v not in (None, "")]
     if present and all(isinstance(v, bool) for v in present):
-        kind = QMetaType.Type.Bool
+        kind = "bool"
     elif present and all(_is_int(v) for v in present):
-        kind = QMetaType.Type.LongLong
+        kind = "int"
     elif present and all(_is_float(v) for v in present):
-        kind = QMetaType.Type.Double
+        kind = "double"
     else:
-        kind = QMetaType.Type.QString
-    return QgsField(str(name)[:60], kind)
+        kind = "string"
+    return new_field(str(name)[:60], kind)
 
 
 def _is_int(v):

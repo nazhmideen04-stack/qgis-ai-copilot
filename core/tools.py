@@ -1,7 +1,7 @@
 """
-Single command set for AI code (20 commands).
+Single command set for AI code (21 commands).
 
-Processing:  run_alg, find_alg, get_layer, style
+Processing:  run_alg, find_alg, get_layer, new_field, style
 Map:         add_basemap, zoom_to, add_points
 Interface:   find_action, run_action, plugin
 Data:        download_osm, load, load_from_link, fetch, layer_from_records
@@ -23,6 +23,7 @@ from . import layout_export as lx
 from . import plugins as pl
 from . import qgis_tools as qt
 from . import web_data as wd
+from .compat import new_field
 from .maps import add_basemap, add_points, zoom_to
 from .osm import download_osm
 from .progress import report_status
@@ -344,7 +345,7 @@ def export(what, path=None, **options):
 
 
 COMMANDS = {
-    "run_alg": qt.run_alg, "find_alg": find_alg, "get_layer": qt.get_layer, "style": style,
+    "run_alg": qt.run_alg, "find_alg": find_alg, "get_layer": qt.get_layer, "new_field": new_field, "style": style,
     "find_action": find_action, "run_action": run_action, "plugin": plugin,
     "add_basemap": add_basemap, "zoom_to": zoom_to, "add_points": add_points,
     "download_osm": download_osm, "load": load, "load_from_link": load_from_link, "fetch": fetch,
