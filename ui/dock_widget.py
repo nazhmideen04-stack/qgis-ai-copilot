@@ -2,7 +2,6 @@ import contextlib
 import html
 import os
 import re
-from urllib.parse import quote
 
 from qgis.core import QgsProject, QgsSettings
 from qgis.PyQt.QtCore import QThread, QTimer, QUrl, pyqtSignal
@@ -46,22 +45,6 @@ def _as_bool(value, default=False):
     if isinstance(value, bool):
         return value
     return str(value).strip().lower() in ("true", "1", "yes")
-
-
-def qgis_proxy_url():
-    """Proxy from QGIS Settings → Options → Network (if enabled)."""
-    s = QgsSettings()
-    if not _as_bool(s.value("proxy/proxyEnabled", False)):
-        return None
-    host = str(s.value("proxy/proxyHost", "") or "").strip()
-    if not host:
-        return None
-    port = str(s.value("proxy/proxyPort", "") or "").strip()
-    user = str(s.value("proxy/proxyUser", "") or "")
-    pwd = str(s.value("proxy/proxyPassword", "") or "")
-    auth = f"{quote(user, safe='')}:{quote(pwd, safe='')}@" if user else ""
-    host = host.split("://", 1)[-1]
-    return f"http://{auth}{host}:{port}" if port else f"http://{auth}{host}"
 
 
 class StreamWorker(QThread):
@@ -175,11 +158,6 @@ class AICopilotDockWidget(QDockWidget):
         key_layout.addWidget(self.show_key_btn)
         layout.addLayout(key_layout)
 
-        self.ssl_cb = QCheckBox("Skip SSL check (only if you get certificate errors)")
-        self.ssl_cb.setChecked(_as_bool(self.settings.value(f"{S}/skip_ssl", False)))
-        self.ssl_cb.toggled.connect(lambda v: self.settings.setValue(f"{S}/skip_ssl", v))
-        layout.addWidget(self.ssl_cb)
-
         self.plugins_cb = QCheckBox("Use installed plugins (send plugin list to the AI)")
         self.plugins_cb.setToolTip("Lets the AI use Processing algorithms, menus and objects of your other plugins")
         self.plugins_cb.setChecked(_as_bool(self.settings.value(f"{S}/use_plugins", True), True))
@@ -281,7 +259,7 @@ class AICopilotDockWidget(QDockWidget):
 
     # ------------------------------------------------------------------ helpers
     def net(self):
-        return ai_client.Net(verify_ssl=not self.ssl_cb.isChecked(), proxy_url=qgis_proxy_url())
+        return ai_client.Net()  # QGIS network settings (proxy, SSL, authentication) apply automatically
 
     def current_key(self):
         return ai_client.clean_api_key(self.api_key_input.text())
@@ -696,7 +674,10 @@ class AICopilotDockWidget(QDockWidget):
         except (ImportError, AttributeError):
             view = None
         if view is not None:
-            pairs.append((view.selectionModel().selectionChanged, self.update_scope_label))
+            pairs.append((view.currentLayerChanged, self.update_scope_label))
+            selection = view.selectionModel()  # may be None before the layer tree model is set
+            if selection is not None:
+                pairs.append((selection.selectionChanged, self.update_scope_label))
         return pairs
 
     def _connect_layer_signals(self):
