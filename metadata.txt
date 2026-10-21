@@ -14,7 +14,7 @@ about=AI Copilot turns natural-language requests into PyQGIS code and runs it in
     - Privacy: your request, a summary of the project (layer and field names, CRS, map extent, installed plugin names) and the printed results of executed code are sent to the selected AI provider. With Ollama everything stays on your computer.
     - AI-generated Python code runs inside QGIS with access to your files and project. By default it runs only after you review it and press Run Code.
     - No additional Python libraries are required (Shapely is used only if it is already installed). Pure Python, no binaries, no regional restrictions.
-    - Sample data for testing is included in the test_data folder.
+    - A demo test (TIN terrain map of Izmir with a reference check script) is included in the test_data folder.
 tracker=https://github.com/nazhmideen04-stack/qgis-ai-copilot/issues
 repository=https://github.com/nazhmideen04-stack/qgis-ai-copilot
 homepage=https://github.com/nazhmideen04-stack/qgis-ai-copilot
@@ -23,7 +23,7 @@ tags=ai, copilot, llm, automation, python, gemini, chatgpt, claude, ollama, plug
 icon=icon.png
 experimental=True
 changelog=
-    0.8.4 - QGIS 3.28+ support (Qt5) besides QGIS 4; better work with installed plugins (algorithms, menus, toolbar buttons); network requests through the QGIS network manager; Google basemaps removed (terms of use) and basemap attribution added to layouts; plugin moved to the Vector menu; sample test data; layout scale bar and stability fixes
+    0.8.4 - QGIS 3.28+ support (Qt5) besides QGIS 4; better work with installed plugins (algorithms, menus, toolbar buttons); network requests through the QGIS network manager; Google basemaps removed (terms of use) and basemap attribution added to layouts; plugin moved to the Vector menu; demo test (TIN terrain map); layout scale bar and stability fixes
     0.8 - Basemaps (Google, OpenStreetMap, Esri, CartoDB), reliable coordinates (zoom_to, add_points), the agent no longer retries errors that need the user
     0.7.1 - The AI does only what was asked; OpenStreetMap only on request or after confirmation; faster, smaller requests
     0.7 - Layers for AI: choose which layers the AI sees in detail (saves tokens in large projects)

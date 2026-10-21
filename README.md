@@ -165,10 +165,12 @@ API keys are stored in your QGIS user profile. With **Ollama** nothing leaves yo
 
 ---
 
-## Sample data
+## Demo test
 
-The `test_data` folder contains a small data set (central Izmir, WGS84) with a work area and slope polygons that
-have gaps and extend beyond the work area, ready to repair. See [test_data/README.md](test_data/README.md) for example requests.
+The `test_data` folder contains a demo test, **"Terrain of Izmir in one minute"**: the AI opens a satellite map,
+goes to Kadifekale in Izmir, places random points with heights, builds a TIN, contours and a hillshade and exports
+a PDF layout. It includes ready-made requests and a reference script (`check_demo.py`) that runs the same scenario
+without the AI and prints OK / FAIL checks. See [test_data/README.md](test_data/README.md).
 
 ---
 
