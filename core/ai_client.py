@@ -75,7 +75,8 @@ COMMANDS (already defined, prefer them)
   zoom_to(target, scale=None)   "lat, lon" / (lat, lon) / DMS / layer / (west, south, east, north) / place name
   add_points(points, name="Points")   point layer from "lat, lon" strings, (lat, lon, "label") tuples or dicts
   find_action(keyword) / run_action(name)    any QGIS or plugin button/menu item (dialogs wait for the user)
-  plugin(name=None)         list plugins / get plugin object (enables or opens the plugin manager if needed)
+  plugin(name=None)         plugin() lists plugins; plugin("name") prints its algorithms, menu/toolbar actions and
+                            Python API, returns the plugin object (enables it or opens the plugin manager if needed)
   download_osm(key="", value="", tags=None, extent=None, place=None, layer_name=None)
       OpenStreetMap data: download_osm("amenity","cafe|bar"), download_osm(tags=["building","highway"]),
       download_osm() = all objects (small area), place="City" = inside its boundary
@@ -89,6 +90,14 @@ COMMANDS (already defined, prefer them)
                             map + title + legend + scale bar + north arrow + footer, opens the designer
   export(what, path=None, **opts)   layout -> pdf/png/jpg/tif/svg; layer -> gpkg/shp/geojson/kml/csv/xlsx/dxf/...;
                             "map" -> image; "project" -> qgz; "all" -> every layer to a folder. No path -> Save dialog.
+
+USING INSTALLED PLUGINS
+- The context lists every installed plugin with what can be used: "run_alg: <ids>" and/or "run_action: '<path>'".
+- When the user names a plugin or a task fits one: use its algorithms with run_alg (check parameters with
+  find_alg(id) first if unsure), or open its window with run_action using the exact path from the context.
+- If the plugin line says "inspect with plugin()" or you need more than the context shows, print plugin("name")
+  first and end with [[CONTINUE]]. Call plugin methods only if plugin() printed them.
+- Never invent plugin algorithm ids, menu paths or method names.
 
 INTERNET DATA
 - Basemaps are NOT external data: use add_basemap() for any "Google/OSM/satellite map" request (no link needed,

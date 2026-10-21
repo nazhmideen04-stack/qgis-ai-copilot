@@ -14,7 +14,7 @@ import time
 
 import qgis.utils
 from qgis.core import Qgis, QgsApplication, QgsProcessingParameterDefinition, QgsSettings
-from qgis.PyQt.QtWidgets import QMessageBox
+from qgis.PyQt.QtWidgets import QMessageBox, QToolBar
 
 from .log import log_info, log_warning
 
@@ -23,7 +23,10 @@ BUILTIN_PROVIDERS = {"native", "qgis", "gdal", "3d", "pdal", "model", "script", 
 # System Python plugins present in every QGIS installation
 CORE_PLUGINS = {"processing", "grassprovider", "db_manager", "MetaSearch", "otbprovider", "sagaprovider"}
 
-MAX_PLUGIN_ALGS_IN_CONTEXT = 25
+MAX_PLUGIN_ALGS_IN_CONTEXT = 40     # algorithm ids in the whole plugin context
+MAX_ALGS_PER_PLUGIN = 6             # algorithm ids per plugin line
+MAX_ACTIONS_PER_PLUGIN = 4          # menu/toolbar actions per plugin line
+MAX_DETAILED_PLUGINS = 30           # plugins described in detail; the rest by name only
 MAX_RELEVANT_ALGS = 5
 MAX_DETAILED_ALGS = 2
 STATIC_CONTEXT_TTL = 60.0  # seconds; the plugin list rarely changes, no need to rebuild it every request
@@ -132,6 +135,61 @@ def _plugin_actions():
     return [(p, a) for p, a in out if not p.startswith(own_menu) and not p.startswith("Plugins > Manage")]
 
 
+def _toolbar_actions():
+    """[(path, QAction)] for buttons on QGIS toolbars (many plugins add only a toolbar button)."""
+    iface = qgis.utils.iface
+    if iface is None:
+        return []
+    out, seen = [], set()
+    for toolbar in iface.mainWindow().findChildren(QToolBar):
+        title = _strip_amp(toolbar.windowTitle()) or toolbar.objectName() or "Toolbar"
+        for action in toolbar.actions():
+            text = _strip_amp(action.text())
+            if action.isSeparator() or not text or id(action) in seen:
+                continue
+            seen.add(id(action))
+            out.append((f"Toolbar {title} > {text}", action))
+    return out
+
+
+def _norm(text):
+    return re.sub(r"[^a-z0-9]", "", str(text).lower())
+
+
+def _provider_owner(provider):
+    """Package name of the plugin that registered a Processing provider (from the provider's module)."""
+    module = type(provider).__module__ or ""
+    return module.split(".")[0]
+
+
+def plugin_catalog(include_core=False):
+    """Installed plugins with what the AI can use: their Processing algorithms and their menu/toolbar actions."""
+    plugins = get_plugins_info(include_core)
+    by_package = {p["package"]: dict(p, algorithms=[], actions=[]) for p in plugins}
+
+    for provider in _providers():
+        if provider.id() in BUILTIN_PROVIDERS:
+            continue
+        owner = _provider_owner(provider)
+        target = by_package.get(owner)
+        if target is None:  # module name differs from the package: match by provider name
+            target = next((p for p in by_package.values()
+                           if _norm(provider.name()) in (_norm(p["name"]), _norm(p["package"]))
+                           or _norm(provider.id()) in (_norm(p["name"]), _norm(p["package"]))), None)
+        if target is not None and provider.isActive():
+            target["algorithms"].extend((a.id(), a.displayName()) for a in provider.algorithms())
+
+    for path, action in _plugin_actions() + _toolbar_actions():
+        parts = [_norm(x) for x in path.split(" > ")]
+        for p in by_package.values():
+            keys = {_norm(p["name"]), _norm(p["package"])}
+            if keys & set(parts) or any(k and k in parts[-1] for k in keys if len(k) > 3):
+                if path not in [a for a, _ in p["actions"]]:
+                    p["actions"].append((path, action))
+                break
+    return list(by_package.values())
+
+
 def _tokens(text):
     words = re.findall(r"[^\W\d_][\w]{2,}", text.lower())  # any alphabet (localized QGIS UI too)
     return {w for w in words if w not in _STOPWORDS}
@@ -191,33 +249,40 @@ def describe_algorithm(alg):
 
 
 def _static_plugins_context():
-    """Installed plugins and their Processing algorithms (cached for STATIC_CONTEXT_TTL seconds)."""
+    """One compact line per installed plugin: how the AI can use it (cached for STATIC_CONTEXT_TTL seconds)."""
     now = time.monotonic()
     if _static_cache["text"] and now - _static_cache["time"] < STATIC_CONTEXT_TTL:
         return _static_cache["text"]
-    parts = []
-    plugins = get_plugins_info()
-    if plugins:
-        act = [f"{p['name']} [{p['package']}]" for p in plugins if p["active"]]
-        inact = [f"{p['name']} [{p['package']}]" for p in plugins if not p["active"]]
-        parts.append("INSTALLED PLUGINS: " + ("; ".join(act) or "none"))
-        if inact:
-            parts.append("DISABLED PLUGINS: " + "; ".join(inact))
-
-    providers = get_plugin_providers()
-    if providers:
-        lines = ["PLUGIN ALGORITHMS (run_alg):"]
-        count = 0
-        for prov in providers:
-            if not prov["active"] or count >= MAX_PLUGIN_ALGS_IN_CONTEXT:
-                continue
-            ids = [alg_id for alg_id, _name in prov["algorithms"]][:MAX_PLUGIN_ALGS_IN_CONTEXT - count]
-            count += len(ids)
-            lines.append(f"  {prov['name']}: {', '.join(ids)}")
-        if count >= MAX_PLUGIN_ALGS_IN_CONTEXT:
-            lines.append("  ... more: find_alg('keyword')")
-        parts.append("\n".join(lines))
-    _static_cache.update(time=now, text="\n".join(parts))
+    catalog = plugin_catalog()
+    active = [p for p in catalog if p["active"]]
+    disabled = [p for p in catalog if not p["active"]]
+    lines = []
+    if active:
+        lines.append("INSTALLED PLUGINS (how to use them):")
+        alg_budget = MAX_PLUGIN_ALGS_IN_CONTEXT
+        for p in active[:MAX_DETAILED_PLUGINS]:
+            parts = []
+            if p["algorithms"]:
+                ids = [alg_id for alg_id, _ in p["algorithms"]][:min(MAX_ALGS_PER_PLUGIN, max(alg_budget, 0))]
+                alg_budget -= len(ids)
+                more = f" (+{len(p['algorithms']) - len(ids)})" if len(p["algorithms"]) > len(ids) else ""
+                parts.append("run_alg: " + ", ".join(ids) + more)
+            if p["actions"]:
+                acts = [f"'{path}'" for path, _ in p["actions"][:MAX_ACTIONS_PER_PLUGIN]]
+                more = f" (+{len(p['actions']) - len(acts)})" if len(p["actions"]) > len(acts) else ""
+                parts.append("run_action: " + ", ".join(acts) + more)
+            if not parts:
+                parts.append("no algorithms or menu items found — inspect with plugin()")
+            lines.append(f"- {p['name']} [{p['package']}]: " + " | ".join(parts))
+        rest = active[MAX_DETAILED_PLUGINS:]
+        if rest:
+            lines.append("- more (inspect with plugin()): " + ", ".join(f"{p['name']} [{p['package']}]" for p in rest))
+    else:
+        lines.append("INSTALLED PLUGINS: none besides core plugins.")
+    if disabled:
+        lines.append("DISABLED PLUGINS (plugin(name) enables after the user confirms): "
+                     + "; ".join(f"{p['name']} [{p['package']}]" for p in disabled))
+    _static_cache.update(time=now, text="\n".join(lines))
     return _static_cache["text"]
 
 
@@ -327,6 +392,9 @@ def enable_plugin(package_name):
         print("User declined enabling the plugin.")
         return False
     ok = qgis.utils.loadPlugin(package_name) and qgis.utils.startPlugin(package_name)
+    if ok and _meta(package_name, "hasProcessingProvider").lower() in ("yes", "true", "1") \
+            and hasattr(qgis.utils, "startProcessingPlugin"):
+        qgis.utils.startProcessingPlugin(package_name)  # registers the plugin's Processing algorithms
     if ok:
         _static_cache["time"] = 0.0
         QgsSettings().setValue(f"PythonPlugins/{package_name}", True)

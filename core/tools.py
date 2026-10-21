@@ -67,13 +67,20 @@ def style(layer, field=None, mode="auto", classes=5, method="jenks", ramp=None, 
 # --------------------------------------------------------------------------- buttons, menus, plugins
 
 def _all_actions():
+    """Every QGIS and plugin button/menu item. One action can appear under several names (menu path, toolbar path,
+    short text), so the exact path the AI got from the context always matches."""
     seen, out = set(), []
-    for text, obj_name, action in qt._qgis_actions():
-        out.append((text, obj_name, action))
-        seen.add(id(action))
-    for path, action in pl._plugin_actions():
-        if id(action) not in seen:
-            out.append((path, action.objectName(), action))
+
+    def add(name, action):
+        key = (name.lower(), id(action))
+        if name and key not in seen:
+            seen.add(key)
+            out.append((name, action.objectName(), action))
+
+    for path, action in pl._plugin_actions() + pl._toolbar_actions():
+        add(path, action)
+    for text, _obj_name, action in qt._qgis_actions():
+        add(text, action)
     return out
 
 
@@ -95,7 +102,11 @@ def run_action(name):
     actions = _all_actions()
     match = next((a for t, o, a in actions if o.lower() == query or t.lower() == query), None)
     if match is None:
-        candidates = [(t, a) for t, o, a in actions if query in t.lower() or query in o.lower()]
+        candidates, ids = [], set()
+        for t, o, a in actions:
+            if (query in t.lower() or query in o.lower()) and id(a) not in ids:  # same action, other name
+                ids.add(id(a))
+                candidates.append((t, a))
         if len(candidates) > 1:
             raise ValueError("Several actions match, be more specific:\n" + "\n".join(t for t, _ in candidates[:15]))
         match = candidates[0][1] if candidates else None
@@ -109,22 +120,68 @@ def run_action(name):
     return True
 
 
-def plugin(name=None):
-    """plugin() — list plugins. plugin("QuickOSM") — the plugin object; a disabled plugin is enabled
-    (after confirmation), a missing one opens the plugin manager."""
+def _find_plugin(name):
+    """Plugin entry by package or title; tolerant to case, spaces and partial names."""
+    catalog = pl.plugin_catalog(include_core=True)
+    wanted = pl._norm(name)
+    exact = [p for p in catalog if wanted in (pl._norm(p["package"]), pl._norm(p["name"]))]
+    if exact:
+        return exact[0], catalog
+    partial = [p for p in catalog if wanted and (wanted in pl._norm(p["package"]) or wanted in pl._norm(p["name"]))]
+    if len(partial) == 1:
+        return partial[0], catalog
+    if len(partial) > 1:
+        raise ValueError(f"Several plugins match '{name}': {[p['name'] for p in partial]}. Use the exact name.")
+    return None, catalog
+
+
+def _print_plugin_info(entry, obj):
+    print(f"{entry['name']} [{entry['package']}] {entry.get('version', '')} — {entry.get('description', '')}")
+    if entry["algorithms"]:
+        print(f"Processing algorithms ({len(entry['algorithms'])}) — use run_alg, see parameters with find_alg(id):")
+        for alg_id, title in entry["algorithms"][:40]:
+            print(f"  {alg_id:45} {title}")
+    if entry["actions"]:
+        print(f"Menu / toolbar actions ({len(entry['actions'])}) — use run_action('<path>'):")
+        for path, action in entry["actions"][:40]:
+            print(f"  {path}{'' if action.isEnabled() else '  (disabled now)'}")
+    if obj is not None:
+        members = [m for m in dir(obj) if not m.startswith("_")]
+        methods = [m for m in members if callable(getattr(obj, m, None))]
+        attrs = [m for m in members if m not in methods]
+        print(f"Python object: {type(obj).__module__}.{type(obj).__name__}")
+        if methods:
+            print("  methods: " + ", ".join(methods[:40]))
+        if attrs:
+            print("  attributes: " + ", ".join(attrs[:40]))
+    if not entry["algorithms"] and not entry["actions"]:
+        print("No Processing algorithms or menu items found for this plugin.")
+
+
+def plugin(name=None, info=True):
+    """plugin() — list plugins with what can be used from each.
+    plugin("QuickOSM") — prints the plugin's algorithms, menu/toolbar actions and Python API, returns the plugin
+    object. A disabled plugin is enabled after the user confirms; a missing one opens the plugin manager."""
     if not name:
-        pl.list_plugins()
+        for p in pl.plugin_catalog():
+            state = "active" if p["active"] else "disabled"
+            print(f"{p['name']} [{p['package']}] {state}: {len(p['algorithms'])} algorithm(s), "
+                  f"{len(p['actions'])} action(s)")
         return None
-    wanted = name.strip().lower()
-    package = next((p["package"] for p in pl.get_plugins_info(include_core=True)
-                    if wanted in (p["package"].lower(), p["name"].lower())), None)
-    if package is None:
+    entry, _catalog = _find_plugin(name)
+    if entry is None:
         print(f"Plugin '{name}' is not installed. Opening the plugin manager so the user can install it.")
         pl.open_plugin_manager()
         return None
-    if package not in qgis.utils.active_plugins and not pl.enable_plugin(package):
-        return None
-    return qgis.utils.plugins.get(package)
+    package = entry["package"]
+    if package not in qgis.utils.active_plugins:
+        if not pl.enable_plugin(package):
+            return None
+        entry, _catalog = _find_plugin(package)  # refresh: algorithms and menus appear after start
+    obj = qgis.utils.plugins.get(package)
+    if info:
+        _print_plugin_info(entry, obj)
+    return obj
 
 
 # --------------------------------------------------------------------------- data
