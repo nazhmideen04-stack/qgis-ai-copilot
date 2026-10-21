@@ -29,14 +29,28 @@ def layout_mm():
     """Millimetres for layout positions and sizes."""
     if hasattr(Qgis, "LayoutUnit"):
         return Qgis.LayoutUnit.Millimeters
-    return QgsUnitTypes.LayoutMillimeters
+    return enum_value(QgsUnitTypes, "LayoutUnit", "LayoutMillimeters")  # QGIS < 3.30
 
 
 def distance_km():
     """Kilometres for scale bars."""
     if hasattr(Qgis, "DistanceUnit"):
         return Qgis.DistanceUnit.Kilometers
-    return QgsUnitTypes.DistanceKilometers
+    return enum_value(QgsUnitTypes, "DistanceUnit", "DistanceKilometers")  # QGIS < 3.30
+
+
+def distance_m():
+    """Metres for scale bars."""
+    if hasattr(Qgis, "DistanceUnit"):
+        return Qgis.DistanceUnit.Meters
+    return enum_value(QgsUnitTypes, "DistanceUnit", "DistanceMeters")  # QGIS < 3.30
+
+
+def metres_per_map_unit(crs):
+    """How many metres one map unit of the CRS is (degrees: ~111 km at the equator)."""
+    if crs.isGeographic():
+        return 111320.0
+    return QgsUnitTypes.fromUnitToUnitFactor(crs.mapUnits(), distance_m())
 
 
 _FIELD_KINDS = {

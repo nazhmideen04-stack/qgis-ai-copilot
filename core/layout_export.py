@@ -22,7 +22,7 @@ from qgis.core import (Qgis, QgsApplication, QgsCoordinateTransform, QgsLayoutEx
 from qgis.PyQt.QtCore import QSize
 from qgis.PyQt.QtGui import QFont
 
-from .compat import distance_km, enum_value, layout_mm, set_label_text, set_rect_null
+from .compat import distance_km, distance_m, enum_value, layout_mm, metres_per_map_unit, set_label_text, set_rect_null
 from .log import log_info
 from .progress import register_output, report_status, run_processing
 from .qgis_tools import get_layer
@@ -112,8 +112,18 @@ def _resolve_layers(layers):
     return [get_layer(item) if not isinstance(item, QgsMapLayer) else item for item in layers]
 
 
-def _extent_for(extent, layers):
+def _map_crs(layers):
+    """Project CRS, or (when the project has none) the CRS of the first layer."""
     project = QgsProject.instance()
+    if project.crs().isValid():
+        return project.crs()
+    candidates = list(layers or []) + [lyr for lyr in project.mapLayers().values() if lyr.isValid()]
+    return next((lyr.crs() for lyr in candidates if lyr.crs().isValid()), project.crs())
+
+
+def _extent_for(extent, layers, crs=None):
+    project = QgsProject.instance()
+    crs = crs if crs is not None else _map_crs(layers)
     if isinstance(extent, QgsRectangle):
         return QgsRectangle(extent)
     sources = []
@@ -125,11 +135,14 @@ def _extent_for(extent, layers):
         rect = QgsRectangle()
         set_rect_null(rect)
         for layer in sources:
-            transform = QgsCoordinateTransform(layer.crs(), project.crs(), project)
+            transform = QgsCoordinateTransform(layer.crs(), crs, project)
             rect.combineExtentWith(transform.transformBoundingBox(layer.extent()))
         rect.scale(1.05)
         return rect
-    return QgsRectangle(qgis.utils.iface.mapCanvas().extent())
+    if qgis.utils.iface is not None:
+        return QgsRectangle(qgis.utils.iface.mapCanvas().extent())
+    all_layers = [lyr for lyr in project.mapLayers().values() if lyr.isValid()]  # no map window
+    return _extent_for(None, all_layers, crs) if all_layers else QgsRectangle()
 
 
 def create_layout(title, layers=None, extent=None, subtitle="", sources="", page="A4", orientation="landscape",
@@ -177,13 +190,15 @@ def create_layout(title, layers=None, extent=None, subtitle="", sources="", page
     layout.addLayoutItem(map_item)
     map_item.attemptMove(_point(map_x, map_y))
     map_item.attemptResize(_size(map_w, map_h))
-    map_item.setCrs(project.crs())
+    map_crs = _map_crs(layer_list)
+    map_item.setCrs(map_crs)
     if layer_list:
-        canvas_order = [lyr for lyr in qgis.utils.iface.mapCanvas().layers() if lyr in layer_list]
+        canvas = qgis.utils.iface.mapCanvas() if qgis.utils.iface is not None else None
+        canvas_order = [lyr for lyr in canvas.layers() if lyr in layer_list] if canvas is not None else []
         ordered = canvas_order + [lyr for lyr in layer_list if lyr not in canvas_order]
         map_item.setLayers(ordered)
         map_item.setKeepLayerSet(True)
-    map_item.zoomToExtent(_extent_for(extent, layer_list))
+    map_item.zoomToExtent(_extent_for(extent, layer_list, map_crs))
     map_item.setFrameEnabled(True)
 
     # --- title and subtitle
@@ -222,13 +237,15 @@ def create_layout(title, layers=None, extent=None, subtitle="", sources="", page
         bar = QgsLayoutItemScaleBar(layout)
         bar.setStyle("Single Box")
         bar.setLinkedMap(map_item)
-        bar.applyDefaultSize(distance_km())
-        bar.setUnitLabel("km")
+        width_m = map_item.extent().width() * metres_per_map_unit(map_crs)
+        use_km = width_m >= 5000  # smaller maps read better in metres
+        bar.applyDefaultSize(distance_km() if use_km else distance_m())
+        bar.setUnitLabel("km" if use_km else "m")
         layout.addLayoutItem(bar)
         bar.attemptMove(_point(map_x + 4, map_y + map_h - 16))
 
     # --- footer
-    footer = f"CRS: {project.crs().authid()}  ·  Created: {datetime.date.today():%Y-%m-%d}"
+    footer = f"CRS: {map_crs.authid() or map_crs.description()}  ·  Created: {datetime.date.today():%Y-%m-%d}"
     if sources:
         footer += f"  ·  Data: {sources}"
     _add_label(layout, footer, margin, page_h - margin - footer_h + 2, page_w - 2 * margin, 6, 8)
