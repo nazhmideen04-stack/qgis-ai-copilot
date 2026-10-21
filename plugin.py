@@ -22,8 +22,8 @@ class AICopilotPlugin:
 
         self.action = QAction(icon, "AI Copilot", self.iface.mainWindow())
         self.action.triggered.connect(self.toggle_dock)
-        self.iface.addToolBarIcon(self.action)
-        self.iface.addPluginToMenu("&AI Copilot", self.action)
+        self.iface.addVectorToolBarIcon(self.action)
+        self.iface.addPluginToVectorMenu("&AI Copilot", self.action)  # category=Vector in metadata.txt
 
     def unload(self):
         if self.dock is not None:
@@ -32,8 +32,8 @@ class AICopilotPlugin:
             self.dock.deleteLater()
             self.dock = None
         if self.action is not None:
-            self.iface.removePluginMenu("&AI Copilot", self.action)
-            self.iface.removeToolBarIcon(self.action)
+            self.iface.removePluginVectorMenu("&AI Copilot", self.action)
+            self.iface.removeVectorToolBarIcon(self.action)
             self.action.deleteLater()
             self.action = None
 

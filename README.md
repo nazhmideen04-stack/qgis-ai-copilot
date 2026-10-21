@@ -53,7 +53,7 @@ It now features a **full chat interface**, allowing the AI to explain its spatia
 
 ## How to Use
 
-1. Click the **AI Copilot** icon on the toolbar or open it via the **Plugins** menu.
+1. Click the **AI Copilot** icon on the **Vector** toolbar or open it via **Vector** -> **AI Copilot**.
 2. Select your AI provider (e.g., *Google Gemini*, *OpenAI*, *DeepSeek*).
 3. Paste your respective API key into the input field.
 4. Type your request in natural language. For example:
@@ -69,16 +69,17 @@ It now features a **full chat interface**, allowing the AI to explain its spatia
 
 ---
 
-## Commands available to AI code (20)
+## Commands available to AI code (21)
 
 | Command | Purpose |
 |---|---|
-| `add_basemap(name)` | Google Maps / Satellite / Hybrid / Terrain, OpenStreetMap, Esri, CartoDB, OpenTopoMap |
+| `add_basemap(name)` | OpenStreetMap, Esri World Imagery / Street Map / Topo, CartoDB, OpenTopoMap (the attribution is added to layouts automatically; Google tiles are not offered because of their terms of use) |
 | `zoom_to(target)` | Go to "lat, lon", DMS coordinates, a layer, a bbox or a place name |
 | `add_points(points)` | Point layer from coordinates |
 | `run_alg(id, params)` | Any Processing algorithm; parameters validated, layers by name, results added to the map |
 | `find_alg(text)` | Search algorithms, or print the parameters of an exact algorithm id |
 | `get_layer(name)` | Layer by name |
+| `new_field(name, kind)` | Attribute field that works on every QGIS version (string, int, double, bool, date, datetime) |
 | `style(layer, field, labels=...)` | Graduated / categorized colours and labels |
 | `find_action(word)` / `run_action(name)` | Any QGIS or plugin button / menu item |
 | `plugin(name)` | List plugins, get a plugin object, enable it or open the plugin manager |
@@ -133,21 +134,41 @@ Uncheck **Use installed plugins** to stop sending the plugin list to the AI prov
 | `HTTP 402` / `429` | No balance or quota exceeded on the provider account. |
 | `HTTP 403` | The key has no access or the service is unavailable in your region. |
 | `HTTP 404` | Model not found — press Refresh and choose another model. |
-| `SSL certificate check failed` | Antivirus/corporate proxy intercepts HTTPS. Enable *Skip SSL check* only if you trust the network. |
+| `SSL certificate check failed` | An antivirus or corporate proxy intercepts HTTPS. Add its certificate in QGIS: *Settings -> Options -> Authentication*. |
 | `network error` | Check the internet connection and the proxy in *Settings → Options → Network*. |
 | `Cannot reach Ollama` | Start Ollama (`ollama serve`) and pull a model (`ollama pull qwen2.5-coder`). |
 
 ---
 
-## Requirements
+## Requirements and restrictions
 
-- QGIS 3.28 or newer (Qt5), or QGIS 4 (Qt6)
-- Python 3.10+ (bundled with standard QGIS installations)
-- An active API key from at least one supported provider:
-  - [Google AI Studio](https://aistudio.google.com/)
-  - [OpenAI Platform](https://platform.openai.com/)
-  - [DeepSeek Platform](https://platform.deepseek.com/)
-  - [Anthropic Console](https://console.anthropic.com/)
+- QGIS 3.28 or newer (Qt5), or QGIS 4 (Qt6). Windows, Linux and macOS; pure Python, no binaries.
+- No additional Python libraries are needed (Shapely is used only if it is already installed).
+- An AI provider:
+  - a cloud account with an API key: [Google AI Studio](https://aistudio.google.com/) (free tier available),
+    [OpenAI Platform](https://platform.openai.com/), [DeepSeek Platform](https://platform.deepseek.com/),
+    [Anthropic Console](https://console.anthropic.com/) (paid services), **or**
+  - [Ollama](https://ollama.com), installed separately, for local models (no account, no internet).
+- Internet access for cloud AI providers, basemaps, OpenStreetMap downloads (Overpass API, Nominatim) and data
+  links. All requests use the QGIS network settings (*Settings -> Options -> Network* and *Authentication*).
+- Please respect the usage policies of the online services (OpenStreetMap tiles, Overpass API, Nominatim, Esri,
+  CARTO): the plugin is meant for interactive use, not for bulk downloads.
+
+---
+
+## Privacy
+
+The following is sent to the AI provider you select: your request, a summary of the project (layer and field
+names, CRS, map extent, installed plugin names; with *Layers for AI* you limit which layers are described) and
+the printed results of the code that was run. Feature data is not sent unless the code prints it.
+API keys are stored in your QGIS user profile. With **Ollama** nothing leaves your computer.
+
+---
+
+## Sample data
+
+The `test_data` folder contains a small data set (central Izmir, WGS84) with a work area and slope polygons that
+have gaps and extend beyond the work area, ready to repair. See [test_data/README.md](test_data/README.md) for example requests.
 
 ---
 
