@@ -1,7 +1,7 @@
 # AI Copilot for QGIS
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
-[![QGIS Version](https://img.shields.io/badge/QGIS-4.x-brightgreen.svg)](https://qgis.org)
+[![QGIS Version](https://img.shields.io/badge/QGIS-3.28%2B%20%7C%204.x-brightgreen.svg)](https://qgis.org)
 
 **AI Copilot** is a universal artificial intelligence assistant plugin for QGIS. It translates natural language instructions into working PyQGIS code and executes spatial workflows directly on your canvas. 
 
@@ -141,7 +141,7 @@ Uncheck **Use installed plugins** to stop sending the plugin list to the AI prov
 
 ## Requirements
 
-- QGIS 4.0 or higher
+- QGIS 3.28 or newer (Qt5), or QGIS 4 (Qt6)
 - Python 3.10+ (bundled with standard QGIS installations)
 - An active API key from at least one supported provider:
   - [Google AI Studio](https://aistudio.google.com/)

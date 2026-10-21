@@ -1,10 +1,10 @@
 [general]
 name=AI Copilot
-qgisMinimumVersion=4.0
+qgisMinimumVersion=3.28
 qgisMaximumVersion=4.99
 supportsQt6=True
 description=Universal AI assistant to manage QGIS with natural language (Gemini, OpenAI, DeepSeek, Claude, Ollama)
-version=0.8
+version=0.8.1
 author=Aidos Nazhmiden
 email=nazhmideen.04@gmail.com
 about=AI Copilot turns natural-language requests into PyQGIS code and runs it in QGIS: geoprocessing with any Processing algorithm, styling, OpenStreetMap downloads, basemaps, coordinates, print layouts and export to any format. It works with your installed plugins, loads data from links you provide (with a preview and your confirmation) and lets you choose which layers the AI sees. Supports Ollama (local), OpenAI, DeepSeek, Google Gemini and Anthropic Claude. AI-generated code runs inside QGIS: review it before running.
@@ -16,6 +16,7 @@ tags=ai, copilot, llm, automation, python, gemini, chatgpt, claude, ollama, plug
 icon=icon.png
 experimental=True
 changelog=
+    0.8.1 - Works on QGIS 3.28 and newer (Qt5) as well as QGIS 4 (Qt6)
     0.8 - Basemaps (Google, OpenStreetMap, Esri, CartoDB), reliable coordinates (zoom_to, add_points), the agent no longer retries errors that need the user
     0.7.1 - The AI does only what was asked; OpenStreetMap only on request or after confirmation; faster, smaller requests
     0.7 - Layers for AI: choose which layers the AI sees in detail (saves tokens in large projects)
