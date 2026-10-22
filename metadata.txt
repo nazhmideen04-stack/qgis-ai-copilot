@@ -4,13 +4,14 @@ qgisMinimumVersion=3.28
 qgisMaximumVersion=4.99
 supportsQt6=True
 description=Universal AI assistant to manage QGIS with natural language (Gemini, OpenAI, DeepSeek, Claude, Ollama)
-version=1.0.0
+version=1.5.2
 author=Aidos Nazhmiden
 email=nazhmideen.04@gmail.com
 about=AI Copilot turns natural-language requests into PyQGIS code and runs it in QGIS: geoprocessing with any Processing algorithm, styling, OpenStreetMap downloads, basemaps, coordinates, print layouts and export to many formats. It works with your installed plugins, loads data only from links you provide (with a preview and your confirmation) and lets you choose which layers the AI sees.
     Requirements and restrictions:
     - An AI provider is required: either a cloud account with an API key (Google Gemini offers a free tier; OpenAI, Anthropic Claude and DeepSeek are paid services) or Ollama, installed separately, for local models (https://ollama.com).
-    - Internet access is needed for cloud AI providers, basemaps, OpenStreetMap downloads (Overpass API and Nominatim) and data links. The QGIS network settings (proxy, SSL, authentication) are used.
+    - Internet access is needed for cloud AI providers, basemaps, OpenStreetMap downloads (Overpass API and Nominatim) and data links. While a data link is attached, only the website of that link is contacted. The QGIS network settings (proxy, SSL, authentication) are used.
+    - Requests and answers are kept in a local archive in your QGIS profile (History button); it can be cleared at any time.
     - Privacy: your request, a summary of the project (layer and field names, CRS, map extent, installed plugin names) and the printed results of executed code are sent to the selected AI provider. With Ollama everything stays on your computer.
     - AI-generated Python code runs inside QGIS with access to your files and project. By default it runs only after you review it and press Run Code.
     - No additional Python libraries are required (Shapely is used only if it is already installed). Pure Python, no binaries, no regional restrictions.
@@ -23,6 +24,15 @@ tags=ai, copilot, llm, automation, python, gemini, chatgpt, claude, ollama, plug
 icon=icon.png
 experimental=False
 changelog=
+    1.5.2 - Strict link rule: while a data link is attached only the website of that link is contacted; links, files and services of other websites are ignored and refused in the code (no permission dialogs, no stored permissions); OpenStreetMap download and place search only when explicitly asked for
+    1.5.1 - With a data link only that page is searched: no other pages of the website are opened (enforced in the code, also for fetch and load); data files and map services linked on the page can still be loaded
+    1.5.0 - The whole text of the attached page is analysed in its own order (short lines and lists with data are no longer dropped, long pages keep the relevant parts, text of JavaScript sites is read from their embedded data); page_text() for extracting data from the text; the Data link section folds away and the request box can be enlarged by dragging the border to the chat
+    1.4.0 - The attached page is read in the background (QGIS no longer freezes) and its text, headings, tables and links are given to the AI together with the question, so it analyses the page directly, usually in one step; page_table(n) turns a table of the page into rows; lighter website search (5 pages); pages are always read fresh, not from the QGIS cache
+    1.3.0 - The AI browses websites step by step like a person (new read_page: page text, headings, tables and ranked links) and does not give up or ask for a direct link while pages are untried; the full output of the previous step is passed to the next step (was cut to 400 characters); matching of word forms, accents and years; up to 8 agent steps
+    1.2.0 - Much better website search for data links: relevance by whole words, priority crawl two levels deep, navigation pages skipped, data embedded in pages (JSON), Raw / Download buttons of file pages, dataset descriptions (datapackage.json, DCAT), open-data portal search (CKAN), site search and sitemap, robots.txt respected, page encodings; the AI first explores the link and then loads the matching data by number; one unreachable page no longer stops the search
+    1.1.2 - Automatic retry when the AI provider is temporarily busy or rate limited (HTTP 503, 529, 429, 5xx): up to 3 retries with a visible countdown, only before the answer has started
+    1.1.1 - Faster answers: new "Fast answers" option limits the internal thinking of models that support it (Gemini 2.5 / 3, OpenAI o3, o4, gpt-5); about 30 percent smaller requests (shorter instructions and memory); only a recent conversation is restored after a restart
+    1.1.0 - Data links: the AI searches the linked page and related pages of the website for tables, data files (also download links without an extension) and map services; request archive (History button) and conversation memory that survives QGIS restarts; fixes for CSV files with semicolons and for downloads on QGIS 3.34
     1.0.0 - First stable release (no longer experimental), includes all changes of 0.8.4
     0.8.4 - QGIS 3.28+ support (Qt5) besides QGIS 4; better work with installed plugins (algorithms, menus, toolbar buttons); network requests through the QGIS network manager; Google basemaps removed (terms of use) and basemap attribution added to layouts; plugin moved to the Vector menu; demo test (TIN terrain map); the AI always answers in the language of the request; layout scale bar and stability fixes
     0.8 - Basemaps (Google, OpenStreetMap, Esri, CartoDB), reliable coordinates (zoom_to, add_points), the agent no longer retries errors that need the user

@@ -11,6 +11,9 @@ It now features a **full chat interface**, allowing the AI to explain its spatia
 
 ## Key Features
 
+- **Fast answers:** the *Fast answers* option (on by default) limits the internal "thinking" of models that support it (Gemini 2.5 / 3, OpenAI o3, o4, gpt-5), so answers come much faster. Switch it off for very complex tasks.
+- **Request archive and memory:** every request is saved with the answer and the result (**History** button: search, view, send again). The AI remembers the conversation (the last 8 messages), also after a QGIS restart (if it was used in the last 12 hours); **Clear** starts a new conversation.
+- **Smart data links:** open the *Data link* section, paste a link and ask your question. Only that page is searched: other pages and other websites are never opened (links, files and services of other websites are ignored; OpenStreetMap only if you ask for it). The plugin reads the page in the background (QGIS does not freeze) and gives the AI the whole text of the page in its order, its headings, tables and links together with your question, so the AI takes the data directly from the text - also from lines and lists like "Konak: 336.545", not only from tables. Data files and map services that the page links to can be loaded too.
 - **Answers in your language:** ask in Russian, Turkish, English or any other language and the AI answers in the same language (also in multi-step agent tasks and fixes). Transliterated text, e.g. Russian typed in Latin letters, is recognised too. The plugin interface itself is in English.
 - **Natural Language Geoprocessing:** Describe what you want to achieve (buffering, layer intersections, filtering, spatial statistics), and the AI writes and executes the code.
 - **Interactive Chat Interface:** The AI acts as a true assistant. It answers theoretical GIS questions, explains its algorithm in plain text, and separates the executable code cleanly for the parser.
@@ -55,6 +58,7 @@ It now features a **full chat interface**, allowing the AI to explain its spatia
 ## How to Use
 
 1. Click the **AI Copilot** icon on the **Vector** toolbar or open it via **Vector** -> **AI Copilot**.
+   The *Data link* section can be folded away, and the border between the chat and the controls can be dragged to make the request box bigger.
 2. Select your AI provider (e.g., *Google Gemini*, *OpenAI*, *DeepSeek*).
 3. Paste your respective API key into the input field.
 4. Type your request in natural language. For example:
@@ -70,7 +74,7 @@ It now features a **full chat interface**, allowing the AI to explain its spatia
 
 ---
 
-## Commands available to AI code (21)
+## Commands available to AI code (25)
 
 | Command | Purpose |
 |---|---|
@@ -86,7 +90,11 @@ It now features a **full chat interface**, allowing the AI to explain its spatia
 | `plugin(name)` | List plugins, get a plugin object, enable it or open the plugin manager |
 | `download_osm(...)` | OpenStreetMap data: any tags, several tags, all objects, by place name |
 | `load(source)` | Local file, file URL or web service (XYZ, WMS, WFS, ArcGIS REST) |
-| `load_from_link()` | Reads the user's link, finds data on it, lets the user choose and confirm, loads it |
+| `page_text()` | The whole text of the attached page, for extracting data written in the text |
+| `page_table(n)` | All rows of table n of the attached page, e.g. `layer_from_records(page_table(1), "Population")` |
+| `read_page()` | Prints the attached page like a person sees it: text, headings, tables and links |
+| `explore_link()` | Lists the numbered data of the attached page: tables, embedded data, linked files and services |
+| `load_from_link(pick=[n])` | Loads the chosen numbers (the user confirms a sample); without `pick` the user chooses in a dialog |
 | `fetch(url)` / `layer_from_records(rows)` | Raw API response; table → layer |
 | `ask` / `choose` / `confirm` | Dialogs: question, choice of data, confirmation with a sample |
 | `create_layout(title, layers)` | Print layout: map, title, legend, scale bar, north arrow, sources |
@@ -132,11 +140,14 @@ Uncheck **Use installed plugins** to stop sending the plugin list to the AI prov
 |---|---|
 | `HTTP 401` / `Invalid API key` | Copy the key again. Make sure it belongs to the selected provider. |
 | `HTTP 400` with Gemini | Usually an invalid key or unavailable model. |
-| `HTTP 402` / `429` | No balance or quota exceeded on the provider account. |
+| `HTTP 402` / `429` | No balance or quota exceeded on the provider account (a short 429 limit is retried automatically). |
 | `HTTP 403` | The key has no access or the service is unavailable in your region. |
 | `HTTP 404` | Model not found — press Refresh and choose another model. |
 | `SSL certificate check failed` | An antivirus or corporate proxy intercepts HTTPS. Add its certificate in QGIS: *Settings -> Options -> Authentication*. |
 | `network error` | Check the internet connection and the proxy in *Settings → Options → Network*. |
+| "No downloadable data found on this page. Ask the user for a direct link…" | This message comes from an **old version** (1.0 or older). Uninstall every *AI Copilot* entry in the plugin manager, delete the old plugin folder (e.g. `qgis-ai-copilot-main`), restart QGIS and install the new ZIP. |
+| `HTTP 503` / `529` (model busy, "high demand") | The provider is temporarily overloaded. The plugin retries automatically 3 times; if it still fails, wait a minute or choose another model. |
+| Answers take long ("model is thinking") | Keep *Fast answers* on and prefer a Flash model; Pro / reasoning models think longer by design. Press *Clear* when you start an unrelated task, so the memory stays short. |
 | `Cannot reach Ollama` | Start Ollama (`ollama serve`) and pull a model (`ollama pull qwen2.5-coder`). |
 
 ---
@@ -162,7 +173,7 @@ Uncheck **Use installed plugins** to stop sending the plugin list to the AI prov
 The following is sent to the AI provider you select: your request, a summary of the project (layer and field
 names, CRS, map extent, installed plugin names; with *Layers for AI* you limit which layers are described) and
 the printed results of the code that was run. Feature data is not sent unless the code prints it.
-API keys are stored in your QGIS user profile. With **Ollama** nothing leaves your computer.
+API keys are stored in your QGIS user profile. The request archive (`ai_copilot_history.json` in the QGIS profile folder) stays on your computer and never contains API keys; **History > Clear archive** deletes it. With **Ollama** nothing leaves your computer.
 
 ---
 
