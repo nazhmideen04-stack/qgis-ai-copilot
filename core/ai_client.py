@@ -5,6 +5,7 @@ Errors are raised as AIError with a user-friendly message.
 """
 import json
 import time
+import unicodedata
 import urllib.parse
 from contextlib import contextmanager
 
@@ -28,7 +29,9 @@ OPENAI_COMPATIBLE = {
 SYSTEM_PROMPT = """You are an expert QGIS assistant (QGIS 3.28+ and QGIS 4). You can do anything QGIS can do.
 
 ANSWER FORMAT
-- Reply in the user's language. Questions -> plain text, no code.
+- ALWAYS reply in the language of the user's request (Russian, Turkish, English, any language). These instructions
+  and the context are in English only for technical reasons: never switch to English because of them.
+- Questions -> plain text, no code.
 - Tasks -> one or two sentences + ALL code in ONE ```python block (never nested or split).
 
 DO ONLY WHAT WAS ASKED
@@ -115,6 +118,37 @@ MULTI-STEP
   message with a separate line [[CONTINUE]]; you will get the output and continue. Never use it on the last step.
 - If the previous run failed, fix it using the error message instead of repeating the same code.
 """
+
+
+# Unicode script names (as in unicodedata.name) -> how the request is written
+_SCRIPTS = [("CYRILLIC", "Cyrillic script"), ("ARABIC", "Arabic script"), ("GREEK", "Greek script"),
+            ("HEBREW", "Hebrew script"), ("CJK", "Chinese characters"), ("HIRAGANA", "Japanese script"),
+            ("KATAKANA", "Japanese script"), ("HANGUL", "Korean script"), ("DEVANAGARI", "Devanagari script"),
+            ("THAI", "Thai script"), ("GEORGIAN", "Georgian script"), ("ARMENIAN", "Armenian script")]
+
+
+def language_hint(text):
+    """Instruction appended to every request so the model answers in the user's language,
+    even though the system prompt and the project context are in English.
+    Non-Latin scripts are named; for Latin letters the language is left to the model, because the letters alone
+    are misleading (e.g. Russian in transliteration typed on a Turkish keyboard contains Turkish letters)."""
+    counts = {}
+    for char in str(text or ""):
+        if not char.isalpha():
+            continue
+        name = unicodedata.name(char, "")
+        script = next((label for key, label in _SCRIPTS if key in name), None)
+        if script:
+            counts[script] = counts.get(script, 0) + 1
+    detected = max(counts, key=counts.get) if counts else None
+    note = f" The request uses {detected}." if detected else (
+        " The request is written in Latin letters. Determine its language from the WORDS, not from single letters: "
+        "it may be English, Turkish, German, or another language typed in Latin letters, for example Russian in "
+        "transliteration (possibly on a Turkish keyboard). Answer in that language, using its normal alphabet "
+        "(transliterated Russian -> answer in Russian with Cyrillic letters).")
+    return ("[Answer language] Write your whole answer - explanation, plan, questions and the text of print() "
+            "reports - in the same language as the user's request above." + note +
+            " Keep code, function names and layer/field names unchanged.")
 
 
 class AIError(Exception):
