@@ -277,25 +277,100 @@ def pick_layers(layers, checked_ids=(), parent=None):
             if list_widget.item(i).checkState() == Qt.CheckState.Checked]
 
 
-# --------------------------------------------------------------------------- website permission
+# --------------------------------------------------------------------------- request archive
 
-def ask_site_permission(domain, url, purpose=""):
-    """→ 'once' | 'always' | None (denied)."""
-    report_status("Waiting for permission to access a website…", domain)
-    box = QMessageBox(_parent())
-    box.setIcon(QMessageBox.Icon.Question)
-    box.setWindowTitle("AI Copilot — internet access")
-    box.setTextFormat(Qt.TextFormat.RichText)
-    box.setText(f"The AI wants to get data from <b>{_esc(domain)}</b>"
-                + (f"<br>Purpose: {_esc(purpose)}" if purpose else "")
-                + f"<br><br><a href='{_esc(url)}'>{_esc(url[:200])}</a><br><br>Allow?")
-    once = box.addButton("Allow once", QMessageBox.ButtonRole.AcceptRole)
-    always = box.addButton("Always allow this site", QMessageBox.ButtonRole.YesRole)
-    box.addButton("Deny", QMessageBox.ButtonRole.RejectRole)
-    box.exec()
-    clicked = box.clickedButton()
-    if clicked == always:
-        return "always"
-    if clicked == once:
-        return "once"
-    return None
+def _status_text(entry):
+    if entry.get("ok") is True:
+        return "OK"
+    if entry.get("ok") is False:
+        return "error"
+    return "answer" if entry.get("answer") else "-"
+
+
+def show_history(archive, parent=None):
+    """Request archive: search, details, send again, delete. Returns the prompt to reuse, or None."""
+    dialog = QDialog(parent or _parent())
+    dialog.setWindowTitle("AI Copilot — request archive")
+    dialog.resize(900, 560)
+    layout = QVBoxLayout(dialog)
+    search = QLineEdit()
+    search.setPlaceholderText("Search in requests and answers…")
+    search.setClearButtonEnabled(True)
+    layout.addWidget(search)
+
+    splitter = QSplitter(Qt.Orientation.Horizontal)
+    list_widget = QListWidget()
+    details = QTextBrowser()
+    details.setOpenExternalLinks(True)
+    splitter.addWidget(list_widget)
+    splitter.addWidget(details)
+    splitter.setSizes([380, 520])
+    layout.addWidget(splitter, 1)
+    chosen = {"prompt": None}
+
+    def fill():
+        text = search.text().lower()
+        list_widget.clear()
+        for entry in archive.entries():
+            if text and text not in (entry["prompt"] + " " + entry.get("answer", "")).lower():
+                continue
+            when = entry["time"].replace("T", " ")[:16]
+            item = QListWidgetItem(f"{when}  [{_status_text(entry)}]  {entry['prompt'][:70]}")
+            item.setData(Qt.ItemDataRole.UserRole, entry["id"])
+            list_widget.addItem(item)
+        list_widget.setCurrentRow(0)
+        if list_widget.count() == 0:
+            details.setHtml("<i>No requests yet.</i>" if not text else "<i>Nothing found.</i>")
+
+    def current():
+        item = list_widget.currentItem()
+        entry_id = item.data(Qt.ItemDataRole.UserRole) if item else None
+        return next((e for e in archive.entries() if e["id"] == entry_id), None)
+
+    def show_details(_row):
+        entry = current()
+        if entry is None:
+            return
+        details.setHtml(
+            f"<p><b>{_esc(entry['time'].replace('T', ' '))}</b> — {_esc(entry.get('provider'))} "
+            f"{_esc(entry.get('model'))} — <b>{_status_text(entry)}</b></p>"
+            f"<p><b>Request:</b><br>{_esc(entry['prompt']).replace(chr(10), '<br>')}</p>"
+            f"<p><b>Answer:</b></p><pre>{_esc(entry.get('answer', ''))[:6000]}</pre>"
+            + (f"<p><b>Result:</b></p><pre>{_esc(entry.get('result', ''))[:3000]}</pre>"
+               if entry.get("result") else ""))
+
+    def use_again():
+        entry = current()
+        if entry is not None:
+            chosen["prompt"] = entry["prompt"]
+            dialog.accept()
+
+    def delete():
+        entry = current()
+        if entry is not None:
+            archive.delete(entry["id"])
+            fill()
+
+    def clear_all():
+        if QMessageBox.question(dialog, "AI Copilot", "Delete the whole request archive?",
+                                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                                QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes:
+            archive.clear()
+            fill()
+
+    search.textChanged.connect(lambda _t: fill())
+    list_widget.currentRowChanged.connect(show_details)
+    list_widget.itemDoubleClicked.connect(lambda _i: use_again())
+    row = QHBoxLayout()
+    for title, slot in (("Use again", use_again), ("Delete", delete), ("Clear archive", clear_all)):
+        button = QPushButton(title)
+        button.clicked.connect(slot)
+        row.addWidget(button)
+    row.addStretch(1)
+    close = QPushButton("Close")
+    close.clicked.connect(dialog.reject)
+    row.addWidget(close)
+    layout.addLayout(row)
+    fill()
+    dialog.exec()
+    return chosen["prompt"]

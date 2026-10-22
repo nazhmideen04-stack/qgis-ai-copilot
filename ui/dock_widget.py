@@ -4,29 +4,34 @@ import os
 import re
 
 from qgis.core import QgsProject, QgsSettings
-from qgis.PyQt.QtCore import QThread, QTimer, QUrl, pyqtSignal
+from qgis.PyQt.QtCore import QThread, QTimer, QUrl, Qt, pyqtSignal
 from qgis.PyQt.QtGui import QDesktopServices, QFontDatabase, QTextCharFormat, QTextCursor
 from qgis.PyQt.QtWidgets import (QApplication, QCheckBox, QComboBox, QDockWidget, QHBoxLayout, QLabel,
-                                 QLineEdit, QMessageBox, QPushButton, QTextBrowser, QTextEdit, QVBoxLayout,
-                                 QWidget)
+                                 QLineEdit, QMessageBox, QPushButton, QSplitter, QTextBrowser, QTextEdit,
+                                 QToolButton, QVBoxLayout, QWidget)
 
 # Relative imports: the plugin works with any folder name
 # (it used to be `qgis_ai_copilot.core` while the folder was `qgis-ai-copilot-main` → ImportError)
 from ..core import ai_client
 from ..core.context import SCOPE_CHOSEN, SCOPES, get_project_context, resolve_scope
 from ..core import osm, progress, web_data
+from ..core.history import RequestArchive
 from ..core.log import log_warning
-from .dialogs import pick_layers
+from .dialogs import pick_layers, show_history
 from .status_panel import StatusPanel
 
 S = "ai_copilot"
-MAX_HISTORY = 3
-MAX_HISTORY_CODE_CHARS = 1500    # code of a previous answer kept in the history
-MAX_HISTORY_TEXT_CHARS = 400     # prose of a previous answer (when it had no code)
-MAX_HISTORY_RESULT_CHARS = 700   # output/error of a previous run kept in the history
+MAX_HISTORY = 8                  # messages the AI remembers
+MAX_DETAILED_HISTORY = 3         # the most recent ones are sent in detail, older ones briefly
+MAX_HISTORY_CODE_CHARS = 900     # code of a recent answer kept in the memory
+MAX_HISTORY_TEXT_CHARS = 250     # explanation of a recent answer
+MAX_HISTORY_RESULT_CHARS = 400   # output/error of a recent run
+MAX_LAST_RESULT_CHARS = 6000     # output of the LAST run: the AI needs all of it for its next step
+PAGE_TEXT_FOR_AI = 9000          # characters of the attached page's text sent with the question (~2300 tokens)
+RESTORE_MEMORY_HOURS = 12        # after a QGIS restart only a recent conversation is restored
 MAX_RESULT_CHARS = 2500          # full error sent with «Fix with AI»
 OSM_WORDS = re.compile(r"\b(osm|openstreetmap|open\s*street\s*map|overpass|quickosm)\b", re.IGNORECASE)
-MAX_AGENT_STEPS = 4       # maximum automatic steps per task
+MAX_AGENT_STEPS = 5       # maximum automatic steps per task
 MAX_AUTO_FIXES = 2        # maximum automatic error fixes in a row
 CONTINUE_MARKER = "[[CONTINUE]]"
 THINKING_AFTER_MS = 1200  # if no characters arrive within this time — show «model is thinking»
@@ -48,13 +53,29 @@ def _as_bool(value, default=False):
 
 
 class StreamWorker(QThread):
+    page_signal = pyqtSignal(str)                  # status while the attached page is read
     chunk_signal = pyqtSignal(str)
+    retry_signal = pyqtSignal(int, int, int, int)  # (attempt, attempts, delay in s, HTTP code)
     finished_signal = pyqtSignal(str, str)  # (full answer, error)
 
-    def __init__(self, provider, model, api_key, prompt, context, net):
+    def __init__(self, provider, model, api_key, prompt, context, net, fast=True, page_url=None, query=""):
         super().__init__()
         self.args = (provider, model, api_key, prompt, context)
         self.net = net
+        self.fast = fast
+        self.page_url, self.query = page_url, query
+        self._cancel = False
+
+    def _page_context(self):
+        """Reads the attached page (once per task, then cached) and returns it as a text block for the AI."""
+        from ..core import link_explorer
+        info = web_data.cached_page(self.page_url)
+        if info is None:
+            self.page_signal.emit(self.page_url)
+            raw = ai_client.fetch_page(self.page_url, ai_client.Net(), cancel=lambda: self._cancel)
+            info = link_explorer.analyse_page(raw, self.page_url, self.query, text_limit=PAGE_TEXT_FOR_AI)
+            web_data.cache_page(self.page_url, info)
+        return f"\n\nATTACHED PAGE CONTENT ({self.page_url}):\n" + link_explorer.context_block(info)
         self._cancel = False
 
     def cancel(self):
@@ -62,8 +83,18 @@ class StreamWorker(QThread):
 
     def run(self):
         parts = []
+        if self.page_url:
+            try:
+                page = self._page_context()
+            except ai_client.Cancelled:
+                self.finished_signal.emit("", "Stopped by user.")
+                return
+            except Exception as e:  # the AI can still use read_page() itself
+                page = f"\n\nATTACHED PAGE ({self.page_url}) could not be read: {e}. Try read_page() or explore_link()."
+            self.args = self.args[:4] + (self.args[4] + page,)
         try:
-            for piece in ai_client.stream_completion(*self.args, net=self.net, cancel=lambda: self._cancel):
+            for piece in ai_client.stream_completion(*self.args, net=self.net, cancel=lambda: self._cancel,
+                                                     fast=self.fast, on_retry=self.retry_signal.emit):
                 parts.append(piece)
                 self.chunk_signal.emit(piece)
             self.finished_signal.emit("".join(parts), "")
@@ -100,7 +131,9 @@ class AICopilotDockWidget(QDockWidget):
 
         self.worker = None
         self.models_worker = None
-        self.chat_history = []
+        self.archive = RequestArchive()
+        self.chat_history = self.archive.conversation_entries(MAX_HISTORY,
+                                                              max_age_hours=RESTORE_MEMORY_HOURS)
         self.pending_code = ""
         self.last_prompt = ""
         self.pending_entry = None  # history entry that pending_code belongs to
@@ -165,12 +198,27 @@ class AICopilotDockWidget(QDockWidget):
         self.plugins_cb.toggled.connect(lambda v: self.settings.setValue(f"{S}/use_plugins", v))
         layout.addWidget(self.plugins_cb)
 
-        layout.addWidget(QLabel("Chat / Output:"))
+        # Chat (top) and the controls with the request box (bottom) share a splitter: drag it to resize
+        self.splitter = QSplitter(Qt.Orientation.Vertical)
+        top = QWidget()
+        top_layout = QVBoxLayout(top)
+        top_layout.setContentsMargins(0, 0, 0, 0)
+        top_layout.addWidget(QLabel("Chat / Output:"))
         self.log_display = QTextBrowser()
         # Links (websites and created files) are opened by us: otherwise file:// would load inside the chat
         self.log_display.setOpenLinks(False)
         self.log_display.anchorClicked.connect(QDesktopServices.openUrl)
-        layout.addWidget(self.log_display, 1)
+        top_layout.addWidget(self.log_display, 1)
+        bottom = QWidget()
+        bottom_layout = QVBoxLayout(bottom)
+        bottom_layout.setContentsMargins(0, 0, 0, 0)
+
+        self.fast_cb = QCheckBox("Fast answers (less model thinking)")
+        self.fast_cb.setToolTip("Limits the internal 'thinking' of models that support it (Gemini 2.5 / 3, OpenAI o3, "
+                                "o4, gpt-5). Much faster answers; switch off for very complex tasks.")
+        self.fast_cb.setChecked(_as_bool(self.settings.value(f"{S}/fast_answers", True), True))
+        self.fast_cb.toggled.connect(lambda v: self.settings.setValue(f"{S}/fast_answers", v))
+        bottom_layout.addWidget(self.fast_cb)
 
         self.agent_cb = QCheckBox("Agent mode: multi-step tasks and automatic error fixing")
         self.agent_cb.setToolTip(
@@ -178,7 +226,7 @@ class AICopilotDockWidget(QDockWidget):
             f"fails (max {MAX_AGENT_STEPS} steps). With Auto-run off you still confirm every step with Run Code.")
         self.agent_cb.setChecked(_as_bool(self.settings.value(f"{S}/agent_mode", True), True))
         self.agent_cb.toggled.connect(lambda v: self.settings.setValue(f"{S}/agent_mode", v))
-        layout.addWidget(self.agent_cb)
+        bottom_layout.addWidget(self.agent_cb)
 
         options = QHBoxLayout()
         self.auto_run_cb = QCheckBox("Auto-run code")
@@ -199,9 +247,9 @@ class AICopilotDockWidget(QDockWidget):
         self.clear_mem_btn.setToolTip("Clear chat and AI memory")
         self.clear_mem_btn.clicked.connect(self.clear_memory)
         options.addWidget(self.clear_mem_btn)
-        layout.addLayout(options)
+        bottom_layout.addLayout(options)
 
-        self._request_label_index = layout.count()
+        self._request_label_index = bottom_layout.count()
 
         scope_row = QHBoxLayout()
         scope_row.addWidget(QLabel("Layers for AI:"))
@@ -216,12 +264,27 @@ class AICopilotDockWidget(QDockWidget):
         self.choose_layers_btn.setToolTip("Choose the layers the AI should work with")
         self.choose_layers_btn.clicked.connect(self.choose_layers)
         scope_row.addWidget(self.choose_layers_btn)
-        layout.addLayout(scope_row)
+        bottom_layout.addLayout(scope_row)
         self.scope_label = QLabel()
         self.scope_label.setStyleSheet("color: gray; font-size: 11px;")
-        layout.addWidget(self.scope_label)
+        bottom_layout.addWidget(self.scope_label)
 
-        layout.addWidget(QLabel("Data link (optional) — the AI uses the internet only with your link:"))
+        link_header = QHBoxLayout()
+        self.link_toggle = QToolButton()
+        self.link_toggle.setText("Data link")
+        self.link_toggle.setCheckable(True)
+        self.link_toggle.setAutoRaise(True)
+        self.link_toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.link_toggle.setToolTip("Show / hide the data link field")
+        link_header.addWidget(self.link_toggle)
+        self.link_summary = QLabel()
+        self.link_summary.setStyleSheet("color: gray; font-size: 11px;")
+        link_header.addWidget(self.link_summary, 1)
+        bottom_layout.addLayout(link_header)
+        self.link_box = QWidget()
+        link_box_layout = QVBoxLayout(self.link_box)
+        link_box_layout.setContentsMargins(0, 0, 0, 0)
+        link_box_layout.addWidget(QLabel("The AI reads this page and uses the internet only with your link:"))
         link_layout = QHBoxLayout()
         self.link_input = QLineEdit()
         self.link_input.setPlaceholderText("Paste a link to a website, file or API with the data you need…")
@@ -232,16 +295,38 @@ class AICopilotDockWidget(QDockWidget):
         self.link_open_btn.setToolTip("Open the link in your browser")
         self.link_open_btn.clicked.connect(self.open_link)
         link_layout.addWidget(self.link_open_btn)
-        layout.addLayout(link_layout)
+        link_box_layout.addLayout(link_layout)
+        bottom_layout.addWidget(self.link_box)
+        self.link_input.textChanged.connect(lambda _t: self.update_link_summary())
+        self.link_toggle.toggled.connect(self.set_link_expanded)
 
-        layout.addWidget(QLabel("Your Request:"))
+        request_row = QHBoxLayout()
+        request_row.addWidget(QLabel("Your Request:"))
+        request_row.addStretch(1)
+        self.history_btn = QPushButton("History")
+        self.history_btn.setToolTip("Archive of your requests: search, view and send again")
+        self.history_btn.clicked.connect(self.open_history)
+        request_row.addWidget(self.history_btn)
+        bottom_layout.addLayout(request_row)
         self.prompt_input = QTextEdit()
-        self.prompt_input.setMaximumHeight(80)
+        self.prompt_input.setMinimumHeight(70)
         self.prompt_input.setPlaceholderText("e.g. Create a 250 m buffer around selected features")
-        layout.addWidget(self.prompt_input)
+        bottom_layout.addWidget(self.prompt_input, 1)  # the request box takes all free space of the bottom pane
 
         self.status = StatusPanel()
-        layout.insertWidget(self._request_label_index, self.status)  # above the request box, next to the chat
+        bottom_layout.insertWidget(self._request_label_index, self.status)  # above the request box, next to the chat
+
+        self.splitter.addWidget(top)
+        self.splitter.addWidget(bottom)
+        self.splitter.setStretchFactor(0, 3)
+        self.splitter.setStretchFactor(1, 2)
+        self.splitter.setChildrenCollapsible(False)
+        saved = self.settings.value(f"{S}/splitter")
+        if saved:
+            self.splitter.restoreState(saved)
+        self.splitter.splitterMoved.connect(self._save_splitter)
+        layout.addWidget(self.splitter, 1)
+        self.set_link_expanded(_as_bool(self.settings.value(f"{S}/link_expanded", False)))
 
         self.run_button = QPushButton("Run with AI")
         self.run_button.clicked.connect(self.on_run_clicked)
@@ -257,6 +342,9 @@ class AICopilotDockWidget(QDockWidget):
         self.on_provider_changed(self.provider_combo.currentText())
         self._connect_layer_signals()
         self.update_scope_label()
+        if self.chat_history:
+            self.append_text(f"Memory: {len(self.chat_history)} message(s) of your last conversation restored. "
+                             "Press Clear to start a new conversation.", "gray")
 
     # ------------------------------------------------------------------ helpers
     def net(self):
@@ -385,8 +473,15 @@ class AICopilotDockWidget(QDockWidget):
                 checked = False
         self.settings.setValue(f"{S}/auto_run", checked)
 
+    def open_history(self):
+        prompt = show_history(self.archive, self)
+        if prompt:
+            self.prompt_input.setPlainText(prompt)
+            self.prompt_input.setFocus()
+
     def clear_memory(self):
         self.chat_history.clear()
+        self.archive.new_conversation()  # the archive keeps the old requests
         self.pending_code = ""
         self.pending_entry = None
         self.last_failed = None
@@ -477,6 +572,8 @@ class AICopilotDockWidget(QDockWidget):
             self.agent_fixes = 0
             self.agent_links = self._user_links(prompt)
             self.lang_hint = ai_client.language_hint(prompt)  # kept for agent steps and "Fix with AI"
+            web_data.set_user_query(prompt)  # the request's words rank the data found on the user's link
+            web_data.clear_page_cache()
             osm.set_osm_request(OSM_WORDS.search(prompt) is not None)
         web_data.set_user_links(self.agent_links)
         self.last_prompt = shown_prompt or prompt
@@ -517,7 +614,10 @@ class AICopilotDockWidget(QDockWidget):
                 log_warning(f"Could not collect plugin context: {e}")
                 context += f"\n\n(plugin context unavailable: {e})"
 
-        history = "".join(self._history_item(h) for h in self.chat_history)
+        recent = self.chat_history[-MAX_HISTORY:]
+        history = "".join(self._history_item(h, brief=i < len(recent) - MAX_DETAILED_HISTORY,
+                                             last=i == len(recent) - 1)
+                          for i, h in enumerate(recent))
         if history:
             context += f"\n\nPREVIOUS CONVERSATION:\n{history}"
 
@@ -527,8 +627,13 @@ class AICopilotDockWidget(QDockWidget):
                               f"Model: {model}" + (f" · {step_info}" if step_info else ""))
 
         hint = getattr(self, "lang_hint", "") or ai_client.language_hint(prompt)
-        self.worker = StreamWorker(provider, model, key, f"{prompt}\n\n{hint}", context, self.net())
+        page_url = self.agent_links[0] if self.agent_links else None
+        self.worker = StreamWorker(provider, model, key, f"{prompt}\n\n{hint}", context, self.net(),
+                                   self.fast_cb.isChecked(), page_url, web_data.user_query())
+        self.worker.page_signal.connect(lambda url: self.status.set_stage(
+            "download", "Reading the attached page…", url[:100]))
         self.worker.chunk_signal.connect(self.on_ai_chunk)
+        self.worker.retry_signal.connect(self.on_ai_retry)
         self.worker.finished_signal.connect(self.on_ai_finished)
         self.worker.start()
         QTimer.singleShot(THINKING_AFTER_MS, self._maybe_thinking)
@@ -541,19 +646,36 @@ class AICopilotDockWidget(QDockWidget):
                                   "for up to a minute before answering.")
 
     @staticmethod
-    def _history_item(h):
-        """Compact history entry: the code (not the explanation) and a short result — saves tokens."""
+    def _history_item(h, brief=False, last=False):
+        """Conversation memory entry. Recent ones: explanation, code and result; older ones (brief): a short
+        summary, so the AI remembers the whole dialog without large requests."""
         from ..core.executor import extract_code
-        code, _warning = extract_code(h["answer"])
+        answer = h.get("answer", "")
+        code, _warning = extract_code(answer)
+        prose = re.sub(r"```.*?(```|$)", " ", answer, flags=re.DOTALL).replace("[[CONTINUE]]", "")
+        prose = re.sub(r"\s+", " ", prose).strip()
+        result = h.get("result", "")
+        if brief:
+            text = f"User: {h['prompt'][:150]}\nAI: {prose[:120]}" + (" (code omitted)" if code else "") + "\n"
+            return text + (f"Result: {result[-100:]}\n" if result else "") + "\n"
         text = f"User: {h['prompt'][:500]}\n"
+        if prose:
+            text += f"AI answer: {prose[:MAX_HISTORY_TEXT_CHARS]}\n"
         if code:
             text += f"AI code:\n{code[:MAX_HISTORY_CODE_CHARS]}\n"
-        else:
-            prose = h["answer"].replace("[[CONTINUE]]", "").strip()
-            text += f"AI answer: {prose[:MAX_HISTORY_TEXT_CHARS]}\n"
-        if h.get("result"):
-            text += f"Result: {h['result'][-MAX_HISTORY_RESULT_CHARS:]}\n"
+        if result:
+            limit = MAX_LAST_RESULT_CHARS if last else MAX_HISTORY_RESULT_CHARS
+            # the start of an output holds the most relevant findings (e.g. the ranked list of explore_link)
+            text += f"Result: {result[:limit] if last else result[-limit:]}\n"
         return text + "\n"
+
+    def on_ai_retry(self, attempt, attempts, delay, code):
+        provider = self.provider_combo.currentText()
+        reason = "is busy" if code in (503, 529) else "limits requests" if code == 429 else "had a server error"
+        self.status.set_stage("thinking", f"{provider} {reason} (HTTP {code}) — retrying in {delay} s",
+                              f"Attempt {attempt}/{attempts}. Press Stop to cancel. Busy periods are usually short.")
+        self.append_text(f"{provider} {reason} (HTTP {code}). Retrying automatically in {delay} s "
+                         f"(attempt {attempt}/{attempts})…", "orange")
 
     def on_ai_chunk(self, chunk):
         self.chars_received += len(chunk)
@@ -577,15 +699,18 @@ class AICopilotDockWidget(QDockWidget):
         self.run_button.setText("Run with AI")
         self.append_text(f"(took {took:.1f}s)", "gray")
 
+        provider, model = self.provider_combo.currentText(), self.model_combo.currentText().strip()
         if error_msg:
             self.append_text(f"Error: {error_msg}", "red", bold=True)
             self.agent_task = None
+            self.archive.add(self.last_prompt, ai_response, provider, model, in_memory=False,
+                             result=f"Error: {error_msg}")
             return  # a cut-off/failed answer is never executed
         if not ai_response.strip():
             self.append_text("The AI returned an empty answer.", "orange")
             return
 
-        entry = {"prompt": self.last_prompt, "answer": ai_response, "result": ""}
+        entry = self.archive.add(self.last_prompt, ai_response, provider, model)
         self.chat_history.append(entry)
         del self.chat_history[:-MAX_HISTORY]
 
@@ -657,6 +782,8 @@ class AICopilotDockWidget(QDockWidget):
         # The result goes into the history — the AI will see it in the next request
         if self.pending_entry is not None:
             self.pending_entry["result"] = result
+            if self.pending_entry.get("id"):
+                self.archive.update(self.pending_entry["id"], result, success)
         answer = self.pending_answer
         self.pending_code = ""
         self.pending_entry = None
@@ -732,6 +859,27 @@ class AICopilotDockWidget(QDockWidget):
             note = str(e)
         self.scope_label.setText(note)
 
+    def _save_splitter(self, *_args):
+        self.settings.setValue(f"{S}/splitter", self.splitter.saveState())
+
+    def set_link_expanded(self, expanded):
+        """Shows or hides the data link field (hidden = more room for the request box)."""
+        self.link_toggle.blockSignals(True)
+        self.link_toggle.setChecked(bool(expanded))
+        self.link_toggle.blockSignals(False)
+        self.link_toggle.setArrowType(Qt.ArrowType.DownArrow if expanded else Qt.ArrowType.RightArrow)
+        self.link_box.setVisible(bool(expanded))
+        self.settings.setValue(f"{S}/link_expanded", bool(expanded))
+        self.update_link_summary()
+
+    def update_link_summary(self):
+        url = self.link_input.text().strip()
+        if url:
+            host = QUrl.fromUserInput(url).host() or url[:40]
+            self.link_summary.setText(f"attached: {host}")
+        else:
+            self.link_summary.setText("" if self.link_toggle.isChecked() else "none — click to add a link")
+
     def open_link(self):
         url = self.link_input.text().strip()
         if url:
@@ -764,7 +912,8 @@ class AICopilotDockWidget(QDockWidget):
 
     def _set_executing(self, on):
         self.executing = on
-        for w in (self.fix_btn, self.clear_mem_btn, self.fetch_models_btn, self.provider_combo, self.prompt_input,
+        for w in (self.fix_btn, self.clear_mem_btn, self.history_btn, self.fetch_models_btn, self.provider_combo,
+                  self.prompt_input,
                   self.link_input, self.scope_combo, self.choose_layers_btn):
             w.setEnabled(not on)
         if on:
