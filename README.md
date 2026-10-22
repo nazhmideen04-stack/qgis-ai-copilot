@@ -11,6 +11,7 @@ It now features a **full chat interface**, allowing the AI to explain its spatia
 
 ## Key Features
 
+- **Answers in your language:** ask in Russian, Turkish, English or any other language and the AI answers in the same language (also in multi-step agent tasks and fixes). Transliterated text, e.g. Russian typed in Latin letters, is recognised too. The plugin interface itself is in English.
 - **Natural Language Geoprocessing:** Describe what you want to achieve (buffering, layer intersections, filtering, spatial statistics), and the AI writes and executes the code.
 - **Interactive Chat Interface:** The AI acts as a true assistant. It answers theoretical GIS questions, explains its algorithm in plain text, and separates the executable code cleanly for the parser.
 - **"God Mode" Execution Scope:** Forget about `NameError`! The plugin automatically pre-loads the entire `qgis.core` library (3000+ classes) into the execution memory. The AI can use any QGIS class without writing a single `import` statement.

@@ -23,7 +23,7 @@ tags=ai, copilot, llm, automation, python, gemini, chatgpt, claude, ollama, plug
 icon=icon.png
 experimental=True
 changelog=
-    0.8.4 - QGIS 3.28+ support (Qt5) besides QGIS 4; better work with installed plugins (algorithms, menus, toolbar buttons); network requests through the QGIS network manager; Google basemaps removed (terms of use) and basemap attribution added to layouts; plugin moved to the Vector menu; demo test (TIN terrain map); layout scale bar and stability fixes
+    0.8.4 - QGIS 3.28+ support (Qt5) besides QGIS 4; better work with installed plugins (algorithms, menus, toolbar buttons); network requests through the QGIS network manager; Google basemaps removed (terms of use) and basemap attribution added to layouts; plugin moved to the Vector menu; demo test (TIN terrain map); the AI always answers in the language of the request; layout scale bar and stability fixes
     0.8 - Basemaps (Google, OpenStreetMap, Esri, CartoDB), reliable coordinates (zoom_to, add_points), the agent no longer retries errors that need the user
     0.7.1 - The AI does only what was asked; OpenStreetMap only on request or after confirmation; faster, smaller requests
     0.7 - Layers for AI: choose which layers the AI sees in detail (saves tokens in large projects)
