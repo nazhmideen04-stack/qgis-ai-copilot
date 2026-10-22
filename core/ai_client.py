@@ -4,6 +4,7 @@ Python standard library only — no external dependencies.
 Errors are raised as AIError with a user-friendly message.
 """
 import json
+import re
 import time
 import unicodedata
 import urllib.parse
@@ -26,97 +27,74 @@ OPENAI_COMPATIBLE = {
     "DeepSeek": "https://api.deepseek.com",
 }
 
-SYSTEM_PROMPT = """You are an expert QGIS assistant (QGIS 3.28+ and QGIS 4). You can do anything QGIS can do.
+SYSTEM_PROMPT = """You are an expert QGIS assistant (QGIS 3.28+ and 4). You can do anything QGIS can do.
 
-ANSWER FORMAT
-- ALWAYS reply in the language of the user's request (Russian, Turkish, English, any language). These instructions
-  and the context are in English only for technical reasons: never switch to English because of them.
-- Questions -> plain text, no code.
-- Tasks -> one or two sentences + ALL code in ONE ```python block (never nested or split).
+ANSWER
+- ALWAYS reply in the language of the user's request; never switch to English because these rules are English.
+- Questions -> plain text, no code. Tasks -> 1-2 sentences + ALL code in ONE ```python block (never split/nested).
 
 DO ONLY WHAT WAS ASKED
-- Write the minimal code for exactly the requested task. No extra actions the user did not ask for:
-  no downloading data, no styling, no layouts, no exports, no zooming, no new layers "for convenience".
-- Use the existing project layers whenever they can do the job.
-- download_osm ONLY when the user explicitly asks to download/get OpenStreetMap data or map features
-  that are not in the project. Never download data as a side step of another task.
-- Prefer one step. Use [[CONTINUE]] only when you truly cannot write correct code without inspecting first.
-- Simple requests need simple code: "open a satellite map" -> add_basemap("Esri World Imagery");
-  "go to 38.42, 27.14" -> zoom_to("38.42, 27.14"); "put a point at ..." -> add_points(...).
+- Minimal code for exactly the request: no unrequested downloads, styling, layouts, exports, zooming or extra layers.
+- Use existing project layers when they can do the job. download_osm ONLY if the user asks for OpenStreetMap data
+  or features not in the project.
+- Prefer one step. Simple requests, simple code: "satellite map" -> add_basemap("Esri World Imagery");
+  "go to 38.42, 27.14" -> zoom_to("38.42, 27.14"); "a point at ..." -> add_points(...).
 
-CODE RULES
-- Never import PyQt5/PyQt6 (use qgis.PyQt). Already available: all qgis.core/gui/analysis classes,
-  QtCore/QtGui/QtWidgets, iface, processing, os, sys, math, json, gdal/ogr/osr, np.
-- The exact QGIS version is in the context. Write code that works on it: fully qualified enums
-  (Qt.GlobalColor.red, QMessageBox.StandardButton.Yes) work on both Qt5 and Qt6 builds.
-- Create attribute fields ONLY with new_field(name, kind), kind = string|int|double|bool|date|datetime
-  (QgsField types differ between QGIS versions). Use exact layer/field names from the context.
-- If the context lists WORKING LAYERS, work with them. Other layers are given by name only; if you need
-  their fields, print them first (get_layer(name).fields()) and continue with [[CONTINUE]].
-- Metric CRS for distances/areas when data is in EPSG:4326.
-
-COORDINATES
-- Users write coordinates as "lat, lon" in WGS84 (EPSG:4326) unless they say otherwise.
-- QgsPointXY is (x=lon, y=lat). The map CRS may differ from EPSG:4326: always transform
-  (QgsCoordinateTransform) — or simply use zoom_to / add_points, which parse and transform for you.
-- The context gives the current map view in WGS84 (center, bounds, scale).
+CODE
+- Never import PyQt5/PyQt6 (use qgis.PyQt). Available: qgis.core/gui/analysis, QtCore/QtGui/QtWidgets, iface,
+  processing, os, sys, math, json, gdal/ogr/osr, np. Fully qualified enums (Qt.GlobalColor.red) work on Qt5 and Qt6.
+- Fields ONLY via new_field(name, kind) (string|int|double|bool|date|datetime). Exact layer/field names from context.
+- WORKING LAYERS in the context are the ones to use; others are listed by name (print their fields if needed).
+- Metric CRS for distances/areas. Coordinates from users are "lat, lon" WGS84; QgsPointXY is (lon, lat); transform
+  to the map CRS (zoom_to/add_points do it). The context gives the map view in WGS84.
 - No try/except that only prints: let errors raise. print() useful results (you will see them).
 
 COMMANDS (already defined, prefer them)
-  run_alg(id, params, load=True, name=None)  any Processing algorithm; validates params, accepts layer names,
-                            adds outputs to the map. Ex: run_alg("native:buffer", {"INPUT": "Roads", "DISTANCE": 100})
-  find_alg(text)            exact id -> prints parameters; otherwise searches algorithms
-  get_layer(name)           layer by name
-  new_field(name, kind)     QgsField for any QGIS version (string|int|double|bool|date|datetime)
-  style(layer, field=None, mode="auto", classes=5, method="jenks", ramp=None, labels=None)
-                            graduated/categorized colours by field, labels by field or expression
-  add_basemap(name)         online basemap: "OpenStreetMap", "Esri World Imagery" (satellite), "Esri World Street Map",
-                            "Esri World Topo", "CartoDB Positron", "CartoDB Dark Matter", "OpenTopoMap".
-                            Google basemaps are not available (Google terms of use): offer the Esri equivalent.
-  zoom_to(target, scale=None)   "lat, lon" / (lat, lon) / DMS / layer / (west, south, east, north) / place name
-  add_points(points, name="Points")   point layer from "lat, lon" strings, (lat, lon, "label") tuples or dicts
-  find_action(keyword) / run_action(name)    any QGIS or plugin button/menu item (dialogs wait for the user)
-  plugin(name=None)         plugin() lists plugins; plugin("name") prints its algorithms, menu/toolbar actions and
-                            Python API, returns the plugin object (enables it or opens the plugin manager if needed)
-  download_osm(key="", value="", tags=None, extent=None, place=None, layer_name=None)
-      OpenStreetMap data: download_osm("amenity","cafe|bar"), download_osm(tags=["building","highway"]),
-      download_osm() = all objects (small area), place="City" = inside its boundary
-  load(source=None, name=None, kind="auto", layer_name="")   local file (None -> file dialog), file URL,
-                            or web service (XYZ/WMS/WFS/ArcGIS REST)
-  load_from_link(url=None)  reads the user's link, finds data on it (files, tables, APIs, CKAN datasets),
-                            lets the user choose, shows a sample, asks to confirm, loads it. Returns layers.
-  fetch(url)                raw API/page response (JSON -> dict/list, else text); layer_from_records(rows, name)
-  ask(question, options=None) / choose(title, items) / confirm(title, description, url, sample)   dialogs
+  run_alg(id, params, load=True, name=None)   any Processing algorithm, validated, layer names OK, outputs added
+      e.g. run_alg("native:buffer", {"INPUT": "Roads", "DISTANCE": 100}); find_alg(text) = search / show parameters
+  get_layer(name); new_field(name, kind); style(layer, field=None, mode="auto", classes=5, ramp=None, labels=None)
+  add_basemap(name): OpenStreetMap, Esri World Imagery (satellite), Esri World Street Map, Esri World Topo,
+      CartoDB Positron, CartoDB Dark Matter, OpenTopoMap (no Google: terms of use, offer Esri)
+  zoom_to("lat, lon" | DMS | layer | (w, s, e, n) | place name, scale=None); add_points(points, name="Points")
+  find_action(word) / run_action(name): QGIS or plugin buttons and menus; plugin(name=None): plugins, their API
+  download_osm(key="", value="", tags=None, extent=None, place=None): OSM data, e.g. ("amenity", "cafe|bar")
+  load(source=None, name=None, kind="auto", layer_name=""): local file (None = dialog), file URL, XYZ/WMS/WFS/ArcGIS
+  explore_link(): lists the NUMBERED data of the attached page (tables, embedded data, linked files, services);
+      load_from_link(pick=[n, ...]) loads those numbers (the user confirms a sample); read_page() prints the page;
+      page_table(n) = all rows of table n of the attached page; page_text() = its whole text;
+      fetch(url); layer_from_records(rows)
+  ask(question, options) / choose(title, items) / confirm(title, description, url, sample): dialogs
   create_layout(title, layers=None, extent=None, subtitle="", sources="", page="A4", orientation="landscape")
-                            map + title + legend + scale bar + north arrow + footer, opens the designer
-  export(what, path=None, **opts)   layout -> pdf/png/jpg/tif/svg; layer -> gpkg/shp/geojson/kml/csv/xlsx/dxf/...;
-                            "map" -> image; "project" -> qgz; "all" -> every layer to a folder. No path -> Save dialog.
+  export(what, path=None): layout -> pdf/png/svg; layer -> gpkg/shp/geojson/kml/csv/xlsx...; "map"; "project"; "all"
 
-USING INSTALLED PLUGINS
-- The context lists every installed plugin with what can be used: "run_alg: <ids>" and/or "run_action: '<path>'".
-- When the user names a plugin or a task fits one: use its algorithms with run_alg (check parameters with
-  find_alg(id) first if unsure), or open its window with run_action using the exact path from the context.
-- If the plugin line says "inspect with plugin()" or you need more than the context shows, print plugin("name")
-  first and end with [[CONTINUE]]. Call plugin methods only if plugin() printed them.
-- Never invent plugin algorithm ids, menu paths or method names.
+PLUGINS
+- The context lists installed plugins with "run_alg: <ids>" and/or "run_action: '<path>'". Use exactly those.
+  If a plugin says "inspect with plugin()", print plugin("name") first and end with [[CONTINUE]].
+- Never invent plugin algorithm ids, menu paths or methods.
 
-INTERNET DATA
-- Basemaps are NOT external data: use add_basemap() for any "OSM/satellite/street map" request (no link needed,
-  no plugins needed).
-- Never suggest, name or link websites or data sources yourself, and never access the internet except
-  add_basemap, zoom_to(place) and download_osm, unless the user gave a link (see USER DATA LINKS).
-- If the task needs external data and there is no link, say briefly that the user should paste a link to the
-  data source into the "Data link" field, or load a local file with load().
-- With a link: call load_from_link(), then join/style/analyse the result. Never invent statistics.
+INTERNET
+- Basemaps (add_basemap), zoom_to(place) and download_osm are built in. Anything else needs a user link
+  (USER DATA LINKS in the context) and uses only that page. Never suggest or name websites or data sources yourself.
+- No link but external data needed: ask the user to paste a link in "Data link" or load a file with load().
+- With a link: search ONLY that page. ATTACHED PAGE CONTENT in the context is the user's page, already read for
+  you: its TEXT in order, headings, tables (first rows) and links. ANALYSE THE TEXT and take the data from it - also
+  data written in paragraphs, lists and lines ("Konak: 336.545"), not only tables. Answer or do the task directly,
+  usually in ONE step. In code: page_table(n) = all rows of a table; page_text() = the whole text (parse it, e.g.
+  with re.findall, and build a layer with layer_from_records(rows, "name")); data files and map services that the
+  page links to: load_from_link(url=<that file>). Numbers like 336.545 / 1.234,5 use dots or commas as thousand
+  separators in many languages.
+- With a link, ONLY that link is used - this is mandatory. Never open, name, suggest or use any other page, website
+  or data source (also not from your own knowledge), no download_osm and no place search unless the user asked for
+  OpenStreetMap. The plugin refuses other websites anyway. If the data is not on the attached page, say exactly
+  what the page contains and that another link is needed. Never invent statistics.
 
-OSM TAGS: food amenity=cafe|restaurant|fast_food|bar ; shop ; health amenity=hospital|clinic|pharmacy ;
-  education amenity=school|university|kindergarten ; roads highway ; railway ; building ; landuse ; natural ;
-  leisure=park ; water natural=water, waterway ; tourism ; amenity=bank|atm|parking|fuel|place_of_worship
+OSM TAGS: amenity=cafe|restaurant|fast_food|bar|hospital|clinic|pharmacy|school|university|bank|atm|parking|fuel;
+  shop; highway; railway; building; landuse; natural; leisure=park; natural=water; waterway; tourism
 
-MULTI-STEP
-- If you must inspect something first (algorithm parameters, field values, link contents), print it and end the
-  message with a separate line [[CONTINUE]]; you will get the output and continue. Never use it on the last step.
-- If the previous run failed, fix it using the error message instead of repeating the same code.
+MULTI-STEP AND MEMORY
+- To inspect first (parameters, fields, link contents): print it and end with a separate line [[CONTINUE]]
+  (never on the last step). If a run failed, fix it from the error instead of repeating the same code.
+- PREVIOUS CONVERSATION in the context is your memory of this dialog: use earlier layers, results and decisions.
 """
 
 
@@ -141,18 +119,22 @@ def language_hint(text):
         if script:
             counts[script] = counts.get(script, 0) + 1
     detected = max(counts, key=counts.get) if counts else None
-    note = f" The request uses {detected}." if detected else (
-        " The request is written in Latin letters. Determine its language from the WORDS, not from single letters: "
-        "it may be English, Turkish, German, or another language typed in Latin letters, for example Russian in "
-        "transliteration (possibly on a Turkish keyboard). Answer in that language, using its normal alphabet "
-        "(transliterated Russian -> answer in Russian with Cyrillic letters).")
-    return ("[Answer language] Write your whole answer - explanation, plan, questions and the text of print() "
-            "reports - in the same language as the user's request above." + note +
-            " Keep code, function names and layer/field names unchanged.")
+    note = f" ({detected})" if detected else (
+        " (Latin letters: judge by the words, not single letters; transliterated Russian -> Russian in Cyrillic)")
+    return ("[Answer language] Write the explanation, plan, questions and print() texts in the language of the "
+            "request above" + note + ". Keep code and layer/field names unchanged.")
+
+
+RETRY_HTTP_CODES = {429, 500, 502, 503, 504, 529}   # temporary provider problems: worth trying again
+RETRY_DELAYS = (3, 8, 15)                          # seconds before the 2nd, 3rd and 4th attempt
 
 
 class AIError(Exception):
-    """Error with a user-friendly message."""
+    """Error with a user-friendly message. code: the HTTP status of the provider's answer, if any."""
+
+    def __init__(self, message, code=None):
+        super().__init__(message)
+        self.code = code
 
 
 class Cancelled(Exception):
@@ -220,6 +202,9 @@ class _QgisResponse:
         for name, value in all_headers.items():
             request.setRawHeader(name.encode("ascii"), str(value).encode("ascii"))
         if payload is None:
+            # always the current version of a page or file, never a stale copy from the QGIS disk cache
+            request.setAttribute(QNetworkRequest.Attribute.CacheLoadControlAttribute,
+                                 QNetworkRequest.CacheLoadControl.AlwaysNetwork)
             self._reply = self._manager.get(request)
         else:
             self._reply = self._manager.post(request, QByteArray(json.dumps(payload).encode("utf-8")))
@@ -368,7 +353,7 @@ def _translate_errors(provider):
     except (AIError, Cancelled):
         raise
     except _HttpError as e:
-        raise AIError(_http_error_message(provider, e.code, e.body)) from None
+        raise AIError(_http_error_message(provider, e.code, e.body), code=e.code) from None
     except _NetworkError as e:
         raise AIError(_network_error_message(provider, e)) from None
     except TimeoutError:
@@ -403,14 +388,40 @@ def _stream_error(chunk):
 
 # --------------------------------------------------------------------------- providers
 
-def _gemini(net, model, key, text):
+def gemini_thinking(model, fast):
+    """Limits the model's internal "thinking" (the main cause of slow answers). None = provider default.
+    Gemini 2.5: thinkingBudget (Flash / Flash-Lite can switch it off, Pro only limit it).
+    Gemini 3.x: thinkingLevel. Older Gemini models have no thinking."""
+    if not fast:
+        return None
+    m = model.lower()
+    if "gemini-2.5" in m:
+        return {"thinkingBudget": 1024 if "pro" in m else 0}
+    if re.search(r"gemini-[3-9]", m):
+        return {"thinkingLevel": "low"}
+    return None
+
+
+def openai_reasoning_effort(model, fast):
+    """OpenAI reasoning models (o3, o4, gpt-5...) accept reasoning_effort; o1 and other models do not."""
+    m = model.lower()
+    if fast and (m.startswith(("o3", "o4")) or m.startswith("gpt-5")):
+        return "low"
+    return None
+
+
+def _gemini(net, model, key, text, fast=True):
     model = model.replace("models/", "", 1)
     url = ("https://generativelanguage.googleapis.com/v1beta/models/"
            f"{urllib.parse.quote(model)}:streamGenerateContent?alt=sse")
+    config = {"temperature": TEMPERATURE}
+    thinking = gemini_thinking(model, fast)
+    if thinking:
+        config["thinkingConfig"] = thinking
     payload = {
         "systemInstruction": {"parts": [{"text": SYSTEM_PROMPT}]},
         "contents": [{"role": "user", "parts": [{"text": text}]}],
-        "generationConfig": {"temperature": TEMPERATURE},
+        "generationConfig": config,
     }
     # The key is sent in a header, not in the URL (keeps it out of logs and error messages)
     with net.open(url, payload, {"x-goog-api-key": key}) as resp:
@@ -431,7 +442,7 @@ def _supports_temperature(model):
     return not (m.startswith(("o1", "o3", "o4", "gpt-5")) or "reasoner" in m)
 
 
-def _openai_compatible(net, base_url, model, key, text):
+def _openai_compatible(net, base_url, model, key, text, fast=True):
     payload = {
         "model": model,
         "messages": [
@@ -442,6 +453,9 @@ def _openai_compatible(net, base_url, model, key, text):
     }
     if _supports_temperature(model):
         payload["temperature"] = TEMPERATURE
+    effort = openai_reasoning_effort(model, fast) if "openai" in base_url else None
+    if effort:
+        payload["reasoning_effort"] = effort
     with net.open(f"{base_url}/chat/completions", payload, {"Authorization": f"Bearer {key}"}) as resp:
         for chunk in _sse(resp):
             _stream_error(chunk)
@@ -502,7 +516,29 @@ def _ollama(net, model, text):
 
 # --------------------------------------------------------------------------- public API
 
-def stream_completion(provider, model, api_key, prompt, context="", net=None, cancel=lambda: False):
+PAGE_TIMEOUT = 25  # seconds for reading an attached web page
+
+
+def fetch_page(url, net=None, cancel=lambda: False):
+    """Downloads an attached web page through the QGIS network (proxy, SSL, authentication). Works in a
+    background thread, so QGIS does not freeze while the page is read."""
+    net = net or Net()
+    net.cancel = cancel
+    with _translate_errors("Website"):
+        with net.open(url, headers={"Accept": "text/html,application/xhtml+xml,*/*"}, timeout=PAGE_TIMEOUT) as resp:
+            return resp.read()
+
+
+def _wait_before_retry(seconds, cancel):
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        if cancel():
+            raise Cancelled()
+        time.sleep(0.2)
+
+
+def stream_completion(provider, model, api_key, prompt, context="", net=None, cancel=lambda: False, fast=True,
+                      on_retry=None):
     """Generator of response text chunks. Raises AIError or Cancelled."""
     net = net or Net()
     net.cancel = cancel
@@ -513,23 +549,41 @@ def stream_completion(provider, model, api_key, prompt, context="", net=None, ca
         raise AIError("No model selected. Press 'Refresh' to load the list or type the model name.")
     text = f"{context}\n\nUser Request:\n{prompt}" if context else prompt
 
-    if provider == "Google Gemini":
-        gen = _gemini(net, model, key, text)
-    elif provider in OPENAI_COMPATIBLE:
-        gen = _openai_compatible(net, OPENAI_COMPATIBLE[provider], model, key, text)
-    elif provider == "Claude (Anthropic)":
-        gen = _claude(net, model, key, text)
-    elif provider == PROVIDER_OLLAMA:
-        gen = _ollama(net, model, text)
-    else:
+    def open_stream():
+        if provider == "Google Gemini":
+            return _gemini(net, model, key, text, fast)
+        if provider in OPENAI_COMPATIBLE:
+            return _openai_compatible(net, OPENAI_COMPATIBLE[provider], model, key, text, fast)
+        if provider == "Claude (Anthropic)":
+            return _claude(net, model, key, text)
+        if provider == PROVIDER_OLLAMA:
+            return _ollama(net, model, text)
         raise AIError(f"Provider '{provider}' is not supported.")
 
-    with _translate_errors(provider):
-        for piece in gen:
-            if cancel():
-                gen.close()
-                raise Cancelled()
-            yield piece
+    # Temporary provider errors (overloaded, rate limit, server error) are retried automatically,
+    # but only while nothing has been received yet - a started answer is never repeated.
+    for attempt in range(len(RETRY_DELAYS) + 1):
+        started = False
+        gen = open_stream()
+        try:
+            with _translate_errors(provider):
+                for piece in gen:
+                    if cancel():
+                        gen.close()
+                        raise Cancelled()
+                    started = True
+                    yield piece
+            return
+        except AIError as e:
+            if started or e.code not in RETRY_HTTP_CODES or attempt >= len(RETRY_DELAYS):
+                if e.code in RETRY_HTTP_CODES and attempt:
+                    raise AIError(f"{e}\n(Tried {attempt + 1} times. Try again later or choose another model.)",
+                                  code=e.code) from None
+                raise
+            delay = RETRY_DELAYS[attempt]
+            if on_retry is not None:
+                on_retry(attempt + 2, len(RETRY_DELAYS) + 1, delay, e.code)
+            _wait_before_retry(delay, cancel)
 
 
 _OPENAI_EXCLUDE = ("audio", "realtime", "tts", "transcribe", "image", "embedding",

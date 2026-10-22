@@ -9,11 +9,10 @@ import re
 import urllib.parse
 
 from qgis.core import (QgsFeature, QgsFields, QgsGeometry, QgsPointXY, QgsProcessingUtils, QgsProject,
-                       QgsRasterLayer, QgsSettings, QgsVectorLayer)
+                       QgsRasterLayer, QgsVectorLayer)
 from qgis.PyQt.QtCore import QUrl
 
 from .compat import new_field
-from .log import log_info
 from .progress import report_status, run_processing
 
 S = "ai_copilot"
@@ -23,7 +22,6 @@ TABLE_EXT = {".csv", ".tsv", ".txt"}
 LON_NAMES = ("lon", "lng", "long", "longitude", "x", "lon_dd")
 LAT_NAMES = ("lat", "latitude", "y", "lat_dd")
 
-_session_allowed = set()
 _user_links = []
 
 
@@ -36,39 +34,65 @@ def user_link():
     return _user_links[0] if _user_links else None
 
 
+_page_cache = {}
+
+
+def cached_page(url):
+    """Content of an attached page that was already read (see link_explorer.analyse_page), or None."""
+    return _page_cache.get(url)
+
+
+def cache_page(url, info):
+    _page_cache[url] = info
+
+
+def clear_page_cache():
+    """A new task reads the attached page again (it may have changed)."""
+    _page_cache.clear()
+
+
+_user_query = [""]
+
+
+def set_user_query(text):
+    """The user's request: its words are used to find the relevant data on the linked website."""
+    _user_query[0] = str(text or "")
+
+
+def user_query():
+    return _user_query[0]
+
+
 # --------------------------------------------------------------------------- permissions
-
-def _allowed_domains():
-    value = QgsSettings().value(f"{S}/allowed_domains", "") or ""
-    return {d for d in str(value).split(",") if d}
-
 
 def _domain(url):
     return (urllib.parse.urlparse(url).hostname or "").lower()
 
 
+def _plain_host(url):
+    host = _domain(url)
+    return host[4:] if host.startswith("www.") else host
+
+
+def link_hosts():
+    """Websites of the links the user attached (www. ignored). Only these may be contacted."""
+    return {_plain_host(u) for u in _user_links if _plain_host(u)}
+
+
 def _check_url(url, purpose=""):
+    """Every download of the plugin passes here. With an attached link ONLY the website of that link is contacted:
+    any other website is refused at once - no dialog, no remembered permissions."""
     parsed = urllib.parse.urlparse(url)
     if parsed.scheme not in ("http", "https"):
         raise ValueError(f"Only http(s) URLs are allowed, got: {url[:80]}")
-    domain = _domain(url)
-    if not domain:
+    if not _domain(url):
         raise ValueError(f"Invalid URL: {url[:80]}")
     if not _user_links:
         raise PermissionError("Internet access is only allowed for links the user provides. "
                               "Ask the user to paste a link into the 'Data link' field.")
-    if domain in {_domain(u) for u in _user_links}:
-        return  # the website of the user's link is allowed
-    if domain in _session_allowed or domain in _allowed_domains():
-        return
-    from ..ui.dialogs import ask_site_permission
-    answer = ask_site_permission(domain, url, purpose)
-    if answer is None:
-        raise PermissionError(f"User denied access to {domain}.")
-    _session_allowed.add(domain)
-    if answer == "always":
-        QgsSettings().setValue(f"{S}/allowed_domains", ",".join(sorted(_allowed_domains() | {domain})))
-    log_info(f"Internet access allowed ({answer}): {domain}")
+    if _plain_host(url) not in link_hosts():
+        raise PermissionError(f"Only the attached link is used. {_domain(url)} is another website: it is not "
+                              "contacted. Use the data of the attached page.")
 
 
 # --------------------------------------------------------------------------- download
@@ -82,14 +106,24 @@ def _guess_suffix(url, default=".dat"):
     return default
 
 
+def _downloaded_path(result, requested):
+    """Path of the downloaded file. Some QGIS versions add an extension to the requested name
+    (page.html -> page.html.html), so the path reported by the algorithm is used."""
+    for path in ((result or {}).get("OUTPUT"), requested):
+        if path and os.path.exists(path):
+            return path
+    raise RuntimeError(f"The download did not produce a file ({requested}).")
+
+
 def download_file(url, filename=None, purpose=""):
     """Downloads a file (with the user's permission) to a temporary folder. Returns the path."""
     _check_url(url, purpose)
     name = filename or ("ai_copilot_download" + _guess_suffix(url))
     target = QgsProcessingUtils.generateTempFilename(name)
-    run_processing("native:filedownloader", {"URL": url, "OUTPUT": target},
-                   stage=f"Downloading from {_domain(url)}…")
-    size = os.path.getsize(target) if os.path.exists(target) else 0
+    result = run_processing("native:filedownloader", {"URL": url, "OUTPUT": target},
+                            stage=f"Downloading from {_domain(url)}…")
+    target = _downloaded_path(result, target)
+    size = os.path.getsize(target)
     print(f"Downloaded {size / 1024:.1f} KB from {_domain(url)} → {target}")
     return target
 
@@ -114,13 +148,15 @@ def _csv_layer(path, name, delimiter=None):
         delimiter = max([",", ";", "\t", "|"], key=header.count)
     cols = [c.strip().strip('"').lower() for c in header.split(delimiter)]
     original = [c.strip().strip('"') for c in header.split(delimiter)]
-    params = {"delimiter": delimiter, "detectTypes": "yes", "geomType": "none"}
+    params = {"type": "csv", "delimiter": "\\t" if delimiter == "\t" else delimiter, "detectTypes": "yes",
+              "geomType": "none"}
     lon = next((original[i] for i, c in enumerate(cols) if c in LON_NAMES), None)
     lat = next((original[i] for i, c in enumerate(cols) if c in LAT_NAMES), None)
     if lon and lat:
         params.update({"xField": lon, "yField": lat, "crs": "EPSG:4326"})
         params.pop("geomType")
-    uri = _local_uri(path) + "?" + urllib.parse.urlencode(params)
+    # not URL-encoded: the delimited text provider expects ";" and "EPSG:4326" as they are
+    uri = _local_uri(path) + "?" + "&".join(f"{k}={v}" for k, v in params.items())
     return QgsVectorLayer(uri, name, "delimitedtext")
 
 

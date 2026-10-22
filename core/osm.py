@@ -51,10 +51,21 @@ def set_osm_request(requested):
     _osm_declined = False
 
 
+def _link_attached():
+    from .web_data import link_hosts
+    return bool(link_hosts())
+
+
+LINK_ONLY = ("A data link is attached, so only that link is used: OpenStreetMap services are other websites and "
+             "are not contacted. Use the data of the attached page (or ask for OpenStreetMap explicitly).")
+
+
 def _check_osm_allowed(label, where):
     global _osm_requested, _osm_declined
     if _osm_requested:
         return
+    if _link_attached():
+        raise PermissionError(LINK_ONLY)
     if _osm_declined:
         raise PermissionError("The user declined downloading OpenStreetMap data for this task. "
                               "Do NOT call download_osm again; use the existing layers or ask the user.")
@@ -123,12 +134,16 @@ def _to_wgs84(extent):
 
 def _download(url, suffix, stage="Downloading…"):
     target = QgsProcessingUtils.generateTempFilename(f"ai_copilot_{suffix}")
-    run_processing("native:filedownloader", {"URL": url, "OUTPUT": target}, stage=stage)
-    return target
+    result = run_processing("native:filedownloader", {"URL": url, "OUTPUT": target}, stage=stage)
+    from .web_data import _downloaded_path
+    return _downloaded_path(result, target)  # some QGIS versions add an extension to the file name
 
 
 def geocode_place(place):
     """Finds a place in OSM (Nominatim). Returns (WGS84 bbox, overpass area id or None, full name)."""
+    if _link_attached() and not _osm_requested:
+        raise PermissionError(LINK_ONLY.replace("OpenStreetMap services are", "the place search (OpenStreetMap) is")
+                              + " Use coordinates or a layer for zoom_to().")
     query = urllib.parse.urlencode({"q": place, "format": "jsonv2", "limit": 1, "polygon": 0})
     report_status(f"Searching place “{place}”…", "OpenStreetMap Nominatim")
     path = _download(f"{NOMINATIM_URL}?{query}", "place.json", stage=f"Searching place “{place}”…")

@@ -1,10 +1,11 @@
 """
-Single command set for AI code (21 commands).
+Single command set for AI code (25 commands).
 
 Processing:  run_alg, find_alg, get_layer, new_field, style
 Map:         add_basemap, zoom_to, add_points
 Interface:   find_action, run_action, plugin
-Data:        download_osm, load, load_from_link, fetch, layer_from_records
+Data:        download_osm, load, load_from_link, explore_link, read_page, page_table, page_text, fetch,
+             layer_from_records
 Dialogs:     ask, choose, confirm
 Output:      create_layout, export
 
@@ -15,11 +16,13 @@ import json
 import os
 import re
 import urllib.parse
+import zipfile
 
 import qgis.utils
 from qgis.core import QgsApplication, QgsMapLayer, QgsPrintLayout, QgsProject
 
 from . import layout_export as lx
+from . import link_explorer as explorer
 from . import plugins as pl
 from . import qgis_tools as qt
 from . import web_data as wd
@@ -27,10 +30,6 @@ from .compat import new_field
 from .maps import add_basemap, add_points, zoom_to
 from .osm import download_osm
 from .progress import report_status
-
-DATA_EXT = (".csv", ".tsv", ".xlsx", ".xls", ".ods", ".json", ".geojson", ".zip", ".gpkg", ".kml", ".kmz",
-            ".gml", ".shp", ".tif", ".tiff", ".fgb", ".parquet", ".xml", ".txt")
-MAX_LINK_CANDIDATES = 40
 
 
 # --------------------------------------------------------------------------- processing
@@ -194,6 +193,8 @@ def load(source=None, name=None, kind="auto", layer_name=""):
     if source is None or (isinstance(source, str) and os.path.exists(source)):
         return wd.load_file(source, name)
     url = str(source)
+    if wd.user_link():
+        url = _allowed_link(url)  # with an attached link: only that page and the files it links to
     low = url.lower()
     service = kind != "auto" or any(s in low for s in ("{z}", "featureserver", "mapserver", "service=wms",
                                                        "service=wfs", "/wms", "/wfs"))
@@ -211,6 +212,8 @@ def load(source=None, name=None, kind="auto", layer_name=""):
 
 def fetch(url):
     """Downloads a website/API response: JSON → Python object, otherwise text. Prints the beginning."""
+    if wd.user_link():
+        url = _allowed_link(url)  # with an attached link: only that page and the files it links to
     text = wd.fetch_text(url, purpose="read data")
     try:
         data = json.loads(text)
@@ -256,101 +259,252 @@ def _records_in_json(data):
     return None
 
 
-def _ckan_resources(url):
-    """CKAN dataset page (…/dataset/<id>) → dataset files through the CKAN API."""
-    parsed = urllib.parse.urlparse(url)
-    match = re.search(r"/dataset/([^/?#]+)", parsed.path)
-    if not match:
-        return None
-    api = f"{parsed.scheme}://{parsed.netloc}/api/3/action/package_show?id={match.group(1)}"
-    try:
-        data = json.loads(wd.fetch_text(api, purpose="read dataset files"))
-    except (ValueError, OSError, RuntimeError):
-        return None
-    result = data.get("result") or {}
-    return [{"title": r.get("name") or "file", "url": r.get("url"), "format": (r.get("format") or "").upper(),
-             "description": (r.get("description") or "")[:300], "source": result.get("title", "")}
-            for r in result.get("resources", []) if r.get("url")]
-
-
-def _html_data_links(html_text, base_url):
-    title = re.search(r"<title[^>]*>(.*?)</title>", html_text, re.I | re.S)
-    page_title = re.sub(r"\s+", " ", title.group(1)).strip() if title else base_url
-    items, seen = [], set()
-    for href, label in re.findall(r'<a[^>]+href=["\']([^"\'#]+)["\'][^>]*>(.*?)</a>', html_text, re.I | re.S):
-        absolute = urllib.parse.urljoin(base_url, href.strip())
-        path = urllib.parse.urlparse(absolute).path.lower()
-        text = re.sub(r"<[^>]+>|\s+", " ", label).strip()
-        is_data = path.endswith(DATA_EXT) or re.search(r"download|export|/api/|format=(csv|json|xlsx|geojson)",
-                                                       absolute, re.I)
-        if is_data and absolute not in seen and absolute.startswith("http"):
-            seen.add(absolute)
-            ext = os.path.splitext(path)[1].upper().lstrip(".")
-            items.append({"title": text or os.path.basename(path) or absolute, "url": absolute,
-                          "format": ext, "source": page_title})
-    return items[:MAX_LINK_CANDIDATES]
-
-
-def _load_one(url, name=None):
-    """Downloads one resource, shows a sample, asks for confirmation and loads it."""
-    path = wd.download_file(url, "ai_copilot_link" + wd._guess_suffix(url, ".dat"), purpose="load data")
+def _sniff_suffix(path, url):
+    """File type of a download: from the URL, otherwise from the file content (download links often have none)."""
+    suffix = wd._guess_suffix(url, "")
+    if suffix:
+        return suffix
     with open(path, "rb") as fh:
-        head = fh.read(2048).lstrip()
-    if head[:1] in (b"{", b"["):
+        head = fh.read(4096)
+    if head.startswith(b"PK"):
+        try:
+            with zipfile.ZipFile(path) as archive:
+                names = archive.namelist()
+        except zipfile.BadZipFile:
+            return ".zip"
+        if any(n.startswith("xl/") for n in names):
+            return ".xlsx"
+        return ".ods" if "content.xml" in names and "mimetype" in names else ".zip"
+    if head.startswith(b"SQLite format 3"):
+        return ".gpkg"
+    if head[:4] in (b"II*\x00", b"MM\x00*"):
+        return ".tif"
+    text = head.lstrip()
+    if text[:1] in (b"{", b"["):
+        return ".json"
+    low = text.lower()
+    if b"<kml" in low:
+        return ".kml"
+    if b"<gml" in low or b"wfs:featurecollection" in low:
+        return ".gml"
+    first_lines = head.decode("utf-8", "replace").splitlines()[:5]
+    if len(first_lines) >= 2 and any(sep in first_lines[0] for sep in (",", ";", "\t", "|")):
+        return ".csv"
+    return ".dat"
+
+
+def _load_one(url, name=None, _hops=0):
+    """Downloads one resource, shows a sample, asks for confirmation and loads it. If the link opens a page that
+    only shows the file (code hosting, data portals), the page's Raw / Download link is followed once."""
+    name = name or os.path.splitext(os.path.basename(urllib.parse.urlparse(url).path))[0] or "Data from link"
+    path = wd.download_file(url, "ai_copilot_link.dat", purpose="load data")
+    with open(path, "rb") as fh:
+        head = fh.read(4096)
+    if b"<html" in head.lower() or head.lstrip().lower().startswith(b"<!doctype html"):
+        with open(path, "rb") as fh:
+            page = explorer._decode(fh.read())
+        target = explorer.raw_file_link(page, url) if _hops == 0 else None
+        if target:
+            print(f"The link opens a page; following its file link: {target}")
+            return _load_one(target, name, _hops + 1)
+        print(f"Skipped {url}: it is a web page, not a data file.")
+        return None
+    suffix = _sniff_suffix(path, url)
+    if suffix != ".dat" and not path.endswith(suffix):
+        os.replace(path, path + suffix)
+        path += suffix
+    if suffix in (".json", ".geojson"):
         with open(path, "r", encoding="utf-8", errors="replace") as fh:
             data = json.load(fh)
         if isinstance(data, dict) and data.get("type") in ("FeatureCollection", "Feature"):
-            if not confirm("GeoJSON data", url=url, sample=_sample_from_file(path)):
+            if not confirm(name or "GeoJSON data", url=url, sample=_sample_from_file(path)):
                 return None
-            os.replace(path, path + ".geojson")
-            return wd.load_file(path + ".geojson", name)
+            if not path.endswith(".geojson"):
+                os.replace(path, path + ".geojson")
+                path += ".geojson"
+            return wd.load_file(path, name)
+        files = _package_files(data, url)
+        if files and _hops < 2:  # a dataset description: load the data files it lists
+            print(f"The JSON describes a dataset with {len(files)} data file(s).")
+            chosen = files if len(files) == 1 else choose("Files of the dataset", files)
+            layers = [_load_one(f["url"], f["title"], _hops + 1) for f in chosen]
+            layers = [lyr for lyr in layers if lyr is not None]
+            return layers or None
         records = _records_in_json(data)
         if not records:
             print("The JSON has no table-like records. Structure:\n" + json.dumps(data, ensure_ascii=False)[:1500])
             return None
-        if not confirm(f"Table with {len(records)} rows", url=url, sample=records[:10]):
+        if not confirm(name or f"Table with {len(records)} rows", url=url, sample=records[:10]):
             return None
         return layer_from_records(records, name or "Data from link")
-    if head[:1] == b"<" and b"<html" in head.lower():
-        return "html"
     if not confirm(name or os.path.basename(urllib.parse.urlparse(url).path) or "Data file",
                    url=url, sample=_sample_from_file(path)):
         return None
-    suffix = wd._guess_suffix(url, "")
-    if suffix and not path.endswith(suffix):
-        os.replace(path, path + suffix)
-        path += suffix
     return wd.load_file(path, name)
 
 
-def load_from_link(url=None):
-    """Main command for the user's link: opens the link, finds data on it (files, tables, APIs,
-    CKAN datasets), lets the user choose, shows a sample, asks for confirmation and loads it.
-    Returns the list of added layers."""
-    url = url or wd.user_link()
-    if not url:
-        raise PermissionError("No data link. Ask the user to paste a link into the 'Data link' field.")
-    low = url.lower()
-    if any(s in low for s in ("{z}", "featureserver", "mapserver", "service=wms", "service=wfs")):
-        return [load(url)]
-
-    report_status("Reading the link…", url)
-    candidates = _ckan_resources(url)
-    if candidates is None:
-        result = _load_one(url)
-        if result != "html":
-            return [result] if result is not None else []
-        candidates = _html_data_links(wd.fetch_text(url, purpose="read page"), url)
-    if not candidates:
-        print("No downloadable data found on this page. Ask the user for a direct link to the file or API.")
+def _package_files(data, base_url):
+    """Data files listed by a dataset description: Frictionless datapackage.json ("resources" with "path"/"url"),
+    schema.org / DCAT ("distribution" with "contentUrl"/"downloadURL"/"accessURL")."""
+    if not isinstance(data, dict):
         return []
-    print(f"Found {len(candidates)} data link(s) on the page.")
-    chosen = choose("Data found at the link", candidates)
-    layers = []
-    for item in chosen:
-        layer = _load_one(item["url"], item.get("title"))
-        if layer not in (None, "html"):
-            layers.append(layer)
+    entries = data.get("resources") or data.get("distribution") or []
+    files = []
+    for entry in entries if isinstance(entries, list) else []:
+        if not isinstance(entry, dict):
+            continue
+        link = (entry.get("path") or entry.get("url") or entry.get("contentUrl") or entry.get("downloadURL")
+                or entry.get("accessURL"))
+        if isinstance(link, list):
+            link = link[0] if link else None
+        if isinstance(link, str) and link:
+            absolute = urllib.parse.urljoin(base_url, link)
+            files.append({"kind": "file", "title": entry.get("title") or entry.get("name") or os.path.basename(link),
+                          "url": absolute, "format": (entry.get("format") or entry.get("encodingFormat") or "").upper(),
+                          "description": str(entry.get("description") or "")[:240], "source": base_url})
+    return [f for f in files if explorer.is_data_link(f["url"]) or f["format"]]
+
+
+NOT_FOUND_ON_PAGE = (
+    "No table, embedded data or data file matching the request was found on the attached page {url}. "
+    "Use the text of the page (page_text()) to take the data from it. If the data is not on this page, tell the "
+    "user what the page contains - only this page is searched, other pages of the website are not opened.")
+
+
+def _norm(url):
+    parsed = urllib.parse.urlparse(str(url).strip())
+    return f"{parsed.scheme.lower()}://{parsed.netloc.lower()}{parsed.path.rstrip('/')}" + \
+        (f"?{parsed.query}" if parsed.query else "")
+
+
+def _allowed_link(url):
+    """Only the attached page itself, and the data files / map services that this page links to directly."""
+    link = wd.user_link()
+    if not link:
+        raise PermissionError("No data link. Ask the user to paste a link into the 'Data link' field.")
+    if url is None or _norm(url) == _norm(link):
+        return link
+    info = wd.cached_page(link) or {}
+    found = explorer.last_found(link, wd.user_query()) or {}
+    linked = {_norm(x["url"]) for x in info.get("links", []) if x.get("kind") in ("data file", "map service")}
+    linked |= {_norm(c["url"]) for c in found.get("candidates", []) if c.get("kind") in ("file", "service")}
+    if _norm(url) in linked:
+        return url
+    raise PermissionError(f"Only the attached page {link} is searched. {url} is another page; it is not opened. "
+                          "Use the text, tables and data files of the attached page.")
+
+
+def _attached_page(url):
+    url = _allowed_link(url)
+    info = wd.cached_page(url)
+    if info is None:
+        info = explorer.read_page(url, wd.user_query())
+        wd.cache_page(url, info)
+    return url, info
+
+
+def page_text(url=None):
+    """The whole text of the attached page, in its order, as one string (lines = paragraphs, list items, cells).
+    Use it to extract data written in the text, e.g. with re.findall, then layer_from_records(...)."""
+    url, info = _attached_page(url)
+    if info.get("is_file"):
+        raise ValueError(f"{url} is a data file, not a web page: use load_from_link().")
+    text = info.get("full_text", "")
+    print(f"Page text: {len(text)} characters, {text.count(chr(10)) + 1} lines")
+    return text
+
+
+def page_table(n=1, url=None):
+    """All rows of table n of the attached page (the context shows each table with its first rows).
+    Example: layer_from_records(page_table(1), "Population")."""
+    url, info = _attached_page(url)
+    tables = info.get("table_rows", [])
+    if not tables:
+        raise ValueError(f"The page {url} has no tables. Use its text, or read_page() to follow its links.")
+    if not 1 <= int(n) <= len(tables):
+        raise ValueError(f"The page has {len(tables)} table(s): use page_table(1) ... page_table({len(tables)}).")
+    rows = tables[int(n) - 1]["records"]
+    print(f"Table {n} '{tables[int(n) - 1]['title']}': {len(rows)} rows, columns {list(rows[0])}")
+    return rows
+
+
+def read_page(url=None, query=None):
+    """Reads a page like a person: title, headings, main text (paragraphs with the request's words first), tables
+    and numbered links (most relevant first). Use it to decide where the data is and which link to follow."""
+    url = _allowed_link(url)
+    if _norm(url) != _norm(wd.user_link()):
+        raise PermissionError(f"{url} is a data file of the page: load it with load_from_link(url=...).")
+    info = wd.cached_page(url) or explorer.read_page(url, wd.user_query() if query is None else query)
+    wd.cache_page(url, info)
+    print(explorer.describe_page(info))
+    return info.get("links", [])
+
+
+def explore_link(url=None, query=None):
+    """Looks at the user's link without loading anything: searches the page and the most promising pages of the same
+    website and prints the numbered tables, embedded data, files and map services found, most relevant first.
+    Then load the matching ones with load_from_link(pick=[numbers])."""
+    url = _allowed_link(url)
+    found = explorer.explore(url, wd.user_query() if query is None else query)
+    print(explorer.describe(found))
+    if not found["candidates"] and not found["direct"]:
+        print(NOT_FOUND_ON_PAGE.format(url=url))
+    return found["candidates"]
+
+
+def _as_list(result):
+    """A loader may return one layer, several layers (a dataset with several files) or None."""
+    if result is None:
+        return []
+    return [r for r in result if r is not None] if isinstance(result, list) else [result]
+
+
+def _load_candidate(item, ask_sample):
+    if item["kind"] == "table":
+        if ask_sample and not confirm(item["title"], item.get("description", ""), item["url"], item.get("sample")):
+            return None
+        return layer_from_records(item["records"], name=item["title"].split(" (")[0][:60])
+    if item["kind"] == "service":
+        return load(item["url"])
+    if item["kind"] == "document":
+        print(f"Skipped {item['url']}: documents (PDF, Word) cannot be loaded as data.")
+        return None
+    return _load_one(item["url"], item.get("title"))
+
+
+def load_from_link(url=None, query=None, pick=None):
+    """Main command for the user's link. Searches the linked page AND the most promising pages of the same website
+    for data: tables on the pages, data embedded in the pages, data files (also download links without an extension
+    and file pages with a Raw / Download button), map services and open-data portal datasets.
+    pick=None: the user chooses in a dialog. pick=[1, 3]: loads those numbers of the last explore_link() result
+    (the user still confirms a sample). Returns the list of added layers."""
+    url = _allowed_link(url)
+    if any(s in url.lower() for s in explorer.SERVICE_PATTERNS):
+        return [load(url)]
+    if _norm(url) != _norm(wd.user_link()):  # a data file that the attached page links to
+        return _as_list(_load_one(url))
+    query = wd.user_query() if query is None else query
+    found = (explorer.last_found(url, query) if pick else None) or explorer.explore(url, query)
+    if found["direct"]:  # the link itself is a file or an API response
+        return _as_list(_load_one(url))
+    candidates = found["candidates"]
+    if not candidates:
+        print(explorer.describe(found))
+        print(NOT_FOUND_ON_PAGE.format(url=url))
+        return []
+    if pick:
+        numbers = [pick] if isinstance(pick, int) else list(pick)
+        chosen = [candidates[n - 1] for n in numbers if 1 <= int(n) <= len(candidates)]
+        if not chosen:
+            raise ValueError(f"pick must be numbers between 1 and {len(candidates)} from explore_link().")
+        ask_sample = True
+    else:
+        print(explorer.describe(found))
+        chosen = choose("Data found at the link", [c for c in candidates if c["kind"] != "document"],
+                        message="The AI searched the link and related pages of the website. Select the data to use "
+                                "(click an item to see details and a sample):")
+        ask_sample = False  # the user has already seen the samples in the choice dialog
+    layers = [layer for item in chosen for layer in _as_list(_load_candidate(item, ask_sample))]
     print(f"Loaded {len(layers)} layer(s): {[lyr.name() for lyr in layers]}")
     return layers
 
@@ -405,7 +559,10 @@ COMMANDS = {
     "run_alg": qt.run_alg, "find_alg": find_alg, "get_layer": qt.get_layer, "new_field": new_field, "style": style,
     "find_action": find_action, "run_action": run_action, "plugin": plugin,
     "add_basemap": add_basemap, "zoom_to": zoom_to, "add_points": add_points,
-    "download_osm": download_osm, "load": load, "load_from_link": load_from_link, "fetch": fetch,
+    "download_osm": download_osm, "load": load, "load_from_link": load_from_link, "explore_link": explore_link,
+    "read_page": read_page, "page_table": page_table,
+    "page_text": page_text,
+    "fetch": fetch,
     "layer_from_records": layer_from_records,
     "ask": ask, "choose": choose, "confirm": confirm,
     "create_layout": create_layout, "export": export,
