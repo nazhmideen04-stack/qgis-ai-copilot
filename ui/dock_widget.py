@@ -110,6 +110,7 @@ class AICopilotDockWidget(QDockWidget):
         self.agent_steps = 0
         self.agent_fixes = 0
         self.agent_links = []
+        self.lang_hint = ""        # answer-language instruction for the current task
         self.chars_received = 0
         self.received_text = ""
         self.executing = False
@@ -475,6 +476,7 @@ class AICopilotDockWidget(QDockWidget):
             self.agent_steps = 0
             self.agent_fixes = 0
             self.agent_links = self._user_links(prompt)
+            self.lang_hint = ai_client.language_hint(prompt)  # kept for agent steps and "Fix with AI"
             osm.set_osm_request(OSM_WORDS.search(prompt) is not None)
         web_data.set_user_links(self.agent_links)
         self.last_prompt = shown_prompt or prompt
@@ -524,7 +526,8 @@ class AICopilotDockWidget(QDockWidget):
         self.status.set_stage("connect", f"Sending request to {provider}…",
                               f"Model: {model}" + (f" · {step_info}" if step_info else ""))
 
-        self.worker = StreamWorker(provider, model, key, prompt, context, self.net())
+        hint = getattr(self, "lang_hint", "") or ai_client.language_hint(prompt)
+        self.worker = StreamWorker(provider, model, key, f"{prompt}\n\n{hint}", context, self.net())
         self.worker.chunk_signal.connect(self.on_ai_chunk)
         self.worker.finished_signal.connect(self.on_ai_finished)
         self.worker.start()
