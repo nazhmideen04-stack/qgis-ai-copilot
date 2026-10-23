@@ -127,6 +127,7 @@ class AICopilotDockWidget(QDockWidget):
     def __init__(self, parent=None):
         super().__init__("AI Copilot", parent)
         self.setObjectName("AICopilotDock")
+        self.setFloating(True)
         self.settings = QgsSettings()
 
         self.worker = None
@@ -309,6 +310,7 @@ class AICopilotDockWidget(QDockWidget):
         request_row.addWidget(self.history_btn)
         bottom_layout.addLayout(request_row)
         self.prompt_input = QTextEdit()
+        self.prompt_input.setStyleSheet("font-size: 16pt;")
         self.prompt_input.setMinimumHeight(70)
         self.prompt_input.setPlaceholderText("e.g. Create a 250 m buffer around selected features")
         bottom_layout.addWidget(self.prompt_input, 1)  # the request box takes all free space of the bottom pane
