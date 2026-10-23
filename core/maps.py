@@ -36,7 +36,12 @@ BASEMAPS = {
     "CartoDB Dark Matter": ("https://a.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png", 20, f"{OSM_CREDIT} © CARTO"),
     "OpenTopoMap": ("https://a.tile.opentopomap.org/{z}/{x}/{y}.png", 17,
                     f"{OSM_CREDIT}, SRTM | Map style © OpenTopoMap (CC-BY-SA)"),
+"Google Satellite": ("https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}", 21, "Map data © Google"),
+    "Google Maps": ("https://mt1.google.com/vt/lyrs=m&x={x}&y={y}&z={z}", 21, "Map data © Google"),
+    "Google Hybrid": ("https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}", 21, "Map data © Google"),
+    "Google Terrain": ("https://mt1.google.com/vt/lyrs=p&x={x}&y={y}&z={z}", 21, "Map data © Google"),
 }
+
 # Google tiles are not offered: their terms do not allow direct tile access outside the Google Maps APIs.
 # Requests for Google maps get the closest allowed basemap, and the user is told so.
 GOOGLE_SUBSTITUTES = {
@@ -44,6 +49,9 @@ GOOGLE_SUBSTITUTES = {
     "terrain": "Esri World Topo", "road": "Esri World Street Map", "map": "Esri World Street Map",
 }
 ALIASES = {
+
+    "google satellite": "Google Satellite", "google": "Google Maps", "google hybrid": "Google Hybrid",
+    "google terrain": "Google Terrain", "google maps": "Google Maps",
     "osm": "OpenStreetMap", "openstreetmap": "OpenStreetMap",
     "satellite": "Esri World Imagery", "imagery": "Esri World Imagery", "esri": "Esri World Imagery",
     "esri satellite": "Esri World Imagery", "street": "Esri World Street Map", "topo": "OpenTopoMap",
@@ -58,10 +66,6 @@ ATTRIBUTION_PROPERTY = "ai_copilot/attribution"
 
 def _resolve_basemap(name):
     key = re.sub(r"\s+", " ", str(name or "OpenStreetMap").strip().lower())
-    if "google" in key:
-        substitute = next((v for k, v in GOOGLE_SUBSTITUTES.items() if k in key), "Esri World Street Map")
-        print(f"Google basemaps are not available (Google terms of use). Using '{substitute}' instead.")
-        return substitute
     for title in BASEMAPS:
         if key == title.lower():
             return title
@@ -79,7 +83,7 @@ def _resolve_basemap(name):
 
 def add_basemap(name="OpenStreetMap"):
     """Adds an online basemap at the bottom of the layer list. Names: OpenStreetMap, Esri World Imagery,
-    Esri World Street Map, Esri World Topo, CartoDB Positron, CartoDB Dark Matter, OpenTopoMap
+    Esri World Street Map, Esri World Topo, CartoDB Positron, CartoDB Dark Matter, OpenTopoMap, Google Satellite, Google Maps
     (aliases like "satellite", "topo", "dark" work too). The provider's attribution is stored with the layer
     and added to print layouts automatically."""
     title = _resolve_basemap(name)
