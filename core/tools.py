@@ -8,6 +8,8 @@ Data:        download_osm, load, load_from_link, explore_link, read_page, page_t
              layer_from_records
 Dialogs:     ask, choose, confirm
 Output:      create_layout, export
+Tables:      field_info, smart_join, join_keys
+Heavy work:  run_in_background
 
 Internet access (except OpenStreetMap) is available only after the user pastes a link
 into the «Data link» field or into the request text.
@@ -29,7 +31,9 @@ from . import web_data as wd
 from .compat import new_field
 from .maps import add_basemap, add_points, zoom_to
 from .osm import download_osm
-from .progress import report_status
+from .field_hints import field_info
+from .progress import report_status, run_in_background
+from .smart_join import smart_join, suggest_join, describe_suggestions
 
 
 # --------------------------------------------------------------------------- processing
@@ -509,6 +513,16 @@ def load_from_link(url=None, query=None, pick=None):
     return layers
 
 
+def join_keys(table, layer):
+    """Prints which fields of a table and a map layer can be used to join them (best first) and returns the list."""
+    suggestions = suggest_join(table, layer)
+    print(describe_suggestions(suggestions))
+    for s in suggestions[:1]:
+        if s["unmatched"]:
+            print(f"Unmatched table keys of the best pair (examples): {s['unmatched']}")
+    return suggestions
+
+
 # --------------------------------------------------------------------------- dialogs
 
 def ask(question, options=None, default=""):
@@ -566,4 +580,6 @@ COMMANDS = {
     "layer_from_records": layer_from_records,
     "ask": ask, "choose": choose, "confirm": confirm,
     "create_layout": create_layout, "export": export,
+    "field_info": field_info, "smart_join": smart_join, "join_keys": join_keys,
+    "run_in_background": run_in_background,
 }

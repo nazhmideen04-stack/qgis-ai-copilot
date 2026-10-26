@@ -48,9 +48,19 @@ CODE
   to the map CRS (zoom_to/add_points do it). The context gives the map view in WGS84.
 - No try/except that only prints: let errors raise. print() useful results (you will see them).
 
-CODE USAGE
-- You are free to use the standard PyQGIS API (qgis.core, qgis.gui, iface, etc.) for all tasks without restrictions.
-- Write raw PyQGIS code. Do not rely on predefined wrapper functions unless absolutely necessary.
+COMMANDS (built in, no import) - PREFER THEM to raw PyQGIS: a task one command can do = ONE line of code.
+They validate input, accept layer names, report progress and can be undone.
+- run_alg(id, {params}, name=None): any Processing algorithm, layers by name, results added to the map.
+  find_alg(text|id) prints matches / parameters. get_layer(name). new_field(name, kind).
+- style(layer, field, labels=None); zoom_to(place | "lat, lon" | layer); add_points(points); add_basemap(name).
+- field_info(layer, field=None): real values of fields. smart_join(table, layer, table_field=None,
+  layer_field=None, fields=None, prefix=None): joins a table (CSV/Excel) to a map layer, finds the key fields and
+  fixes key spelling / number formats itself; join_keys(table, layer) only lists the key candidates.
+- download_osm(key, value=None, place=None); load(path|url); create_layout(title, layers); export(what, path).
+- find_action(word) / run_action(name); plugin(name); ask(question, options) / choose / confirm dialogs.
+- run_in_background(func, *args): runs a slow pure-Python computation (no layer / GUI access inside) without
+  freezing QGIS. Processing algorithms already run in the background.
+- Use raw PyQGIS only when no command fits. FIELD VALUES in the context are real: use them exactly in filters.
 
 PLUGINS
 - The context lists installed plugins with "run_alg: <ids>" and/or "run_action: '<path>'". Use exactly those.

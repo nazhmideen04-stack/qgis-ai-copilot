@@ -6,6 +6,7 @@ from .log import log_warning
 MAX_FIELDS = 15
 MAX_LAYERS = 40
 MAX_OTHER_NAMES = 30
+MAX_HINT_LAYERS = 8   # layers whose field values are described (field hints)
 
 # Which layers the AI gets in detail
 SCOPE_ALL = "all"
@@ -52,7 +53,7 @@ def resolve_scope(scope, chosen_ids=()):
     return layers, f"AI sees {len(layers)} of {total} layer(s) in detail, the rest by name only"
 
 
-def _describe(layer):
+def _describe(layer, hints=False):
     info = f"- '{layer.name()}'"
     if isinstance(layer, QgsVectorLayer):
         geom = QgsWkbTypes.displayString(layer.wkbType())
@@ -64,12 +65,22 @@ def _describe(layer):
         info += f" [Raster, bands: {layer.bandCount()}, size: {layer.width()}x{layer.height()}]"
     else:
         info += f" [{type(layer).__name__}]"
-    return info + f", CRS: {layer.crs().authid()}"
+    info += f", CRS: {layer.crs().authid()}"
+    if hints and isinstance(layer, QgsVectorLayer):
+        try:
+            from .field_hints import context_hint
+            line = context_hint(layer)
+            if line:
+                info += "\n" + line
+        except Exception as e:  # hints are optional
+            log_warning(f"Field hints for '{layer.name()}' failed: {e}")
+    return info
 
 
-def get_project_context(working_layers=None) -> str:
+def get_project_context(working_layers=None, hints=False) -> str:
     """Project context. working_layers=None — all layers in detail; otherwise only the working layers
-    in detail and the remaining layers by name only (saves tokens in large projects)."""
+    in detail and the remaining layers by name only (saves tokens in large projects).
+    hints=True adds the real values of the fields (FIELD VALUES) of the first MAX_HINT_LAYERS layers."""
     project = QgsProject.instance()
     iface = _iface()
     lines = [f"QGIS version: {Qgis.version()}",
@@ -92,14 +103,15 @@ def get_project_context(working_layers=None) -> str:
 
     if working_layers is None:
         lines.append("Open layers:")
-        lines.extend(_describe(layer) for layer in layers[:MAX_LAYERS])
+        lines.extend(_describe(layer, hints and i < MAX_HINT_LAYERS) for i, layer in enumerate(layers[:MAX_LAYERS]))
         if len(layers) > MAX_LAYERS:
             lines.append(f"... and {len(layers) - MAX_LAYERS} more layers")
         return "\n".join(lines)
 
     working_ids = {layer.id() for layer in working_layers}
     lines.append("WORKING LAYERS (chosen by the user; work with these unless the user names another layer):")
-    lines.extend(_describe(layer) for layer in working_layers[:MAX_LAYERS])
+    lines.extend(_describe(layer, hints and i < MAX_HINT_LAYERS)
+                 for i, layer in enumerate(working_layers[:MAX_LAYERS]))
     others = [layer.name() for layer in layers if layer.id() not in working_ids]
     if others:
         shown = ", ".join(f"'{name}'" for name in others[:MAX_OTHER_NAMES])

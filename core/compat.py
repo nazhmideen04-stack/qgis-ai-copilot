@@ -89,3 +89,48 @@ def set_label_text(label, text_format, font):
         label.setTextFormat(text_format)
     else:
         label.setFont(font)
+
+
+def no_geometry_flag():
+    """QgsFeatureRequest flag: do not fetch geometries (Qgis.FeatureRequestFlag in 3.36+, older names before)."""
+    from qgis.core import QgsFeatureRequest
+    scoped = getattr(Qgis, "FeatureRequestFlag", None)
+    if scoped is not None and hasattr(scoped, "NoGeometry"):
+        return scoped.NoGeometry
+    return enum_value(QgsFeatureRequest, "Flag", "NoGeometry")
+
+
+def attribute_request(layer, field_names=None, geometry=False):
+    """Feature request for a fast scan: only the given attributes, no geometry unless asked."""
+    from qgis.core import QgsFeatureRequest
+    request = QgsFeatureRequest()
+    if not geometry:
+        request.setFlags(no_geometry_flag())
+    if field_names is not None:
+        request.setSubsetOfAttributes(list(field_names), layer.fields())
+    return request
+
+
+def algorithm_runs_in_main_thread(alg):
+    """True if a Processing algorithm must not run in a background thread (NoThreading flag)."""
+    from qgis.core import QgsProcessingAlgorithm
+    scoped = getattr(Qgis, "ProcessingAlgorithmFlag", None)
+    flag = getattr(scoped, "NoThreading", None) if scoped is not None else None
+    if flag is None:
+        flag = getattr(QgsProcessingAlgorithm, "FlagNoThreading", None)
+    if flag is None:
+        return False
+    try:
+        return bool(alg.flags() & flag)
+    except TypeError:
+        return False
+
+
+def is_expression_field(layer, index):
+    """Virtual (expression) fields are computed for every feature: too slow for value scans."""
+    from qgis.core import QgsFields
+    origin = layer.fields().fieldOrigin(index)
+    expression = getattr(Qgis, "FieldOrigin", None)
+    if expression is not None and hasattr(expression, "Expression"):
+        return origin == expression.Expression
+    return origin == enum_value(QgsFields, "FieldOrigin", "OriginExpression")
