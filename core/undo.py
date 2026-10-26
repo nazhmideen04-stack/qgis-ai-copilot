@@ -68,7 +68,7 @@ def _join_key(join):
 
 def _copy_data(layer):
     """Fields and features of a memory layer, with a hash to detect changes cheaply."""
-    digest = hashlib.sha1()
+    digest = hashlib.blake2b(digest_size=16)  # change detection only, not security
     features = []
     for feature in layer.getFeatures():
         attrs = list(feature.attributes())
@@ -82,7 +82,7 @@ def _copy_data(layer):
 
 
 def _data_hash(layer):
-    digest = hashlib.sha1()
+    digest = hashlib.blake2b(digest_size=16)  # change detection only, not security
     for feature in layer.getFeatures():
         geom = feature.geometry()
         digest.update(repr(list(feature.attributes())).encode("utf-8", "replace"))
