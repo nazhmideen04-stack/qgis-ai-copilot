@@ -4,7 +4,7 @@ qgisMinimumVersion=3.28
 qgisMaximumVersion=4.99
 supportsQt6=True
 description=Universal AI assistant to manage QGIS with natural language (Gemini, OpenAI, DeepSeek, Claude, Ollama)
-version=1.5.2
+version=1.8.0
 author=Aidos Nazhmiden
 email=nazhmideen.04@gmail.com
 about=AI Copilot turns natural-language requests into PyQGIS code and runs it in QGIS: geoprocessing with any Processing algorithm, styling, OpenStreetMap downloads, basemaps, coordinates, print layouts and export to many formats. It works with your installed plugins, loads data only from links you provide (with a preview and your confirmation) and lets you choose which layers the AI sees.
@@ -12,7 +12,7 @@ about=AI Copilot turns natural-language requests into PyQGIS code and runs it in
     - An AI provider is required: either a cloud account with an API key (Google Gemini offers a free tier; OpenAI, Anthropic Claude and DeepSeek are paid services) or Ollama, installed separately, for local models (https://ollama.com).
     - Internet access is needed for cloud AI providers, basemaps, OpenStreetMap downloads (Overpass API and Nominatim) and data links. While a data link is attached, only the website of that link is contacted. The QGIS network settings (proxy, SSL, authentication) are used.
     - Requests and answers are kept in a local archive in your QGIS profile (History button); it can be cleared at any time.
-    - Privacy: your request, a summary of the project (layer and field names, CRS, map extent, installed plugin names) and the printed results of executed code are sent to the selected AI provider. With Ollama everything stays on your computer.
+    - Privacy: your request, a summary of the project (layer and field names, CRS, map extent, installed plugin names; with Field value hints on, also value ranges and typical values of fields of the working layers) and the printed results of executed code are sent to the selected AI provider. With Ollama everything stays on your computer.
     - AI-generated Python code runs inside QGIS with access to your files and project. By default it runs only after you review it and press Run Code.
     - No additional Python libraries are required (Shapely is used only if it is already installed). Pure Python, no binaries, no regional restrictions.
     - A demo test (TIN terrain map of Izmir with a reference check script) is included in the test_data folder.
@@ -20,10 +20,15 @@ tracker=https://github.com/nazhmideen04-stack/qgis-ai-copilot/issues
 repository=https://github.com/nazhmideen04-stack/qgis-ai-copilot
 homepage=https://github.com/nazhmideen04-stack/qgis-ai-copilot
 category=Vector
-tags=ai, copilot, llm, automation, python, gemini, chatgpt, claude, ollama, plugins, processing, osm, openstreetmap, basemap, layout, export
+tags=ai, copilot, undo, join, scenarios, llm, automation, python, gemini, chatgpt, claude, ollama, plugins, processing, osm, openstreetmap, basemap, layout, export
 icon=icon.png
 experimental=False
 changelog=
+    1.8.0 - Your own quick commands: a list of existing commands with arguments ($1, ${2:default}, $*, $last = the layer the previous line made) or Python code; /newcommand <name> <what it does> lets the AI write one for you to check and save; /commands opens the editor (new, edit, delete, import, export); a saved scenario can be made into a command; four example commands to start from (relief, density, quickmap, osmhex); your commands appear in /help and in the hints while typing
+    1.7.1 - Interface language: Auto (follows the QGIS language) or English
+    1.7.0 - Settings (provider, model, key and options) fold away under a Settings button with a one-line summary; Russian interface (automatic by the QGIS language or chosen in the settings, switches without restart); risky code check: before code that deletes or moves files, runs system commands or hidden code, clears the project or writes straight into layer files the plugin asks for confirmation, also with Auto-run; compact chat: code is folded behind «Show code», long output and errors show a few lines with «Show all»; the Join table and Fields buttons are removed (/join and /fields stay, the AI still joins tables and sees field values); 15 new quick commands: /info /stats /count /top /calc /measure /heatmap /hexbin /nearest /intersect /merge /fix /csv /pdf /screenshot, /help grouped
+    1.6.1 - The panel docks inside the QGIS window again (it no longer opens as a floating window that is too tall to dock; the settings scroll); the request box is a separate bar docked at the bottom centre of the QGIS window with the Run button and the status; the settings / chat panel can be docked on any side and its place is remembered
+    1.6.0 - Undo AI button: reverts the last AI action (new layers, removed layers, styles, filters, joins, data edits, layouts, map view); field value hints: the AI sees real ranges and values of fields, and the Fields window inserts fields and values into the request; smart join of a table to a map layer (key fields found automatically, spelling / accents / number formats matched); Processing algorithms run in a background thread so QGIS no longer freezes; saved scenarios (a task with its code runs again without the AI, export / import); quick commands typed with / run without the AI (/buffer, /clip, /alg, /zoom, /join, /undo, /help…) and the AI prefers the built-in commands to raw code; new modern, slightly smaller font of the request box, Ctrl+Enter sends
     1.5.2 - Strict link rule: while a data link is attached only the website of that link is contacted; links, files and services of other websites are ignored and refused in the code (no permission dialogs, no stored permissions); OpenStreetMap download and place search only when explicitly asked for
     1.5.1 - With a data link only that page is searched: no other pages of the website are opened (enforced in the code, also for fetch and load); data files and map services linked on the page can still be loaded
     1.5.0 - The whole text of the attached page is analysed in its own order (short lines and lists with data are no longer dropped, long pages keep the relevant parts, text of JavaScript sites is read from their embedded data); page_text() for extracting data from the text; the Data link section folds away and the request box can be enlarged by dragging the border to the chat

@@ -11,6 +11,38 @@ It now features a **full chat interface**, allowing the AI to explain its spatia
 
 ## Key Features
 
+### New in 1.8 — your own commands
+- **`/newcommand <name> <what it does>`** — the AI writes the command, you check it in the editor and press *Save*; after that it runs instantly, without the AI. Example: `/newcommand slope slope in degrees of a DEM layer, coloured`.
+- **`/commands`** — editor of your commands: new, edit, delete, import / export (share them with colleagues). Two kinds:
+  - *List of commands* — no programming: one command per line, run as one action (one Undo).
+    `$1` … `$9` are your arguments, `${2:100}` = argument 2 or 100, `$*` = all arguments, `$last` = the layer the previous line created:
+    ```
+    /measure $1
+    /calc $1 density = round("$2" / "area_km2", 1)
+    /style $1 density
+    ```
+    saved as `density`, it runs as `/density Districts pop`.
+  - *Python* — the same environment as AI code; `args`, `kwargs` and `arg(1, default)` hold the arguments.
+- **Scenarios → Make a command…** turns a saved task into a command.
+- Four examples are added on the first start: `/relief`, `/density`, `/quickmap`, `/osmhex`. Your commands are listed in `/help` and shown while you type `/`.
+
+### New in 1.7
+- **Tidy panel:** provider, model, API key and the options are folded under **Settings**; a one-line summary shows the model (red if the key is missing). Chat, buttons and the request bar stay in view.
+- **Russian interface:** *Settings → Interface language*: Auto (follows the QGIS language; Russian when QGIS is in Russian) or English. Switches at once, without a restart.
+- **Risky code check:** before code that deletes or moves files, runs system commands or hidden code, clears the project or writes straight into the data of an existing layer (SHP / GPKG changes that Undo AI cannot revert) the plugin lists what the code will do and asks — also with Auto-run. Switch: *Ask before risky code*.
+- **Compact chat:** the AI's explanation is shown, its code is folded behind **▸ Show code**; long output and errors show a few lines with **Show all**.
+- **More quick commands:** `/info`, `/stats`, `/count`, `/top`, `/calc`, `/measure`, `/heatmap`, `/hexbin`, `/nearest`, `/intersect`, `/merge`, `/fix`, `/csv`, `/pdf`, `/screenshot` — see `/help`.
+
+### New in 1.6
+- **Two dockable panels:** the request bar is docked at the bottom centre of the QGIS window (input box, **Run with AI**, live status). Settings and chat are a second panel, docked on the right by default; drag it to any side or float it — its place is remembered. The toolbar button shows / hides both.
+- **Undo AI:** one click reverts the last AI action — layers it added are removed, layers it removed come back (temporary layers with their data), styles, labels, filters, names, visibility and table joins are restored, data edits are reverted, new layouts are removed and the map view returns. The last 10 actions can be undone one by one. Files written to disk are not deleted.
+- **Field value hints:** the AI sees the real ranges and values of the fields of the working layers (e.g. `type: 'farm'|'forest'|'urban'`, `pop: 12..53400`) and writes filters with exactly those values. `/fields` opens a window that shows layers → fields → values; a double click puts a field or a value into your request. Switch off with *Field value hints for the AI*.
+- **Smart join:** `/join` (or just ask the AI) joins a CSV / Excel table to a map layer. The key fields are found by comparing the values, and `"01"` = `1`, `İzmir` = `IZMIR`, `Bayraklı` = `Bayrakli` still match. Exact keys → live QGIS join; keys that only match after normalising → a new layer with the table columns. It reports how many features got data and which table rows did not match.
+- **No freezing:** Processing algorithms (from the AI, commands and `run_alg`) run in a background thread; the map, the panel and **Stop** stay responsive. `run_in_background(func)` does the same for slow Python computations.
+- **Saved scenarios:** **Scenarios…** saves a task together with the code that worked. Run it again later *without the AI* (instant, free, the same result), send it to the AI again, or share it via export / import.
+- **Commands instead of code:** type `/` in the request box for quick commands that run at once without the AI: `/buffer Roads 250`, `/clip Parcels Boundary`, `/alg native:centroids INPUT=Parcels`, `/filter Parcels "area" > 5000`, `/zoom Izmir`, `/join`, `/fields`, `/undo`, `/scenario <name>`, `/help` for the full list. The AI itself now prefers these validated one-line commands to long raw PyQGIS code.
+- **Request box:** a clean modern font (Segoe UI / Helvetica Neue / Ubuntu / Noto Sans, whatever your system has), a bit smaller, rounded border; **Ctrl+Enter** sends.
+
 - **Fast answers:** the *Fast answers* option (on by default) limits the internal "thinking" of models that support it (Gemini 2.5 / 3, OpenAI o3, o4, gpt-5), so answers come much faster. Switch it off for very complex tasks.
 - **Request archive and memory:** every request is saved with the answer and the result (**History** button: search, view, send again). The AI remembers the conversation (the last 8 messages), also after a QGIS restart (if it was used in the last 12 hours); **Clear** starts a new conversation.
 - **Smart data links:** open the *Data link* section, paste a link and ask your question. Only that page is searched: other pages and other websites are never opened (links, files and services of other websites are ignored; OpenStreetMap only if you ask for it). The plugin reads the page in the background (QGIS does not freeze) and gives the AI the whole text of the page in its order, its headings, tables and links together with your question, so the AI takes the data directly from the text - also from lines and lists like "Konak: 336.545", not only from tables. Data files and map services that the page links to can be loaded too.
@@ -74,7 +106,7 @@ It now features a **full chat interface**, allowing the AI to explain its spatia
 
 ---
 
-## Commands available to AI code (25)
+## Commands available to AI code (29)
 
 | Command | Purpose |
 |---|---|
@@ -99,6 +131,9 @@ It now features a **full chat interface**, allowing the AI to explain its spatia
 | `ask` / `choose` / `confirm` | Dialogs: question, choice of data, confirmation with a sample |
 | `create_layout(title, layers)` | Print layout: map, title, legend, scale bar, north arrow, sources |
 | `export(what, path)` | Layout, layer, map image, project or all layers to any format |
+| `field_info(layer, field=None)` | Real values of fields: ranges, distinct values |
+| `smart_join(table, layer, ...)` / `join_keys(table, layer)` | Join a table to a map layer with automatic key detection |
+| `run_in_background(func, *args)` | Slow pure-Python computation without freezing QGIS |
 
 Uncheck **Use installed plugins** to stop sending the plugin list to the AI provider.
 
@@ -172,7 +207,7 @@ Uncheck **Use installed plugins** to stop sending the plugin list to the AI prov
 
 The following is sent to the AI provider you select: your request, a summary of the project (layer and field
 names, CRS, map extent, installed plugin names; with *Layers for AI* you limit which layers are described) and
-the printed results of the code that was run. Feature data is not sent unless the code prints it.
+the printed results of the code that was run. With *Field value hints for the AI* on (default), the value ranges and up to six typical values of the fields of the working layers are sent too; switch it off to send field names only. Other feature data is not sent unless the code prints it. Saved scenarios are kept in `ai_copilot_scenarios.json` in the QGIS profile folder.
 API keys are stored in your QGIS user profile. The request archive (`ai_copilot_history.json` in the QGIS profile folder) stays on your computer and never contains API keys; **History > Clear archive** deletes it. With **Ollama** nothing leaves your computer.
 
 ---

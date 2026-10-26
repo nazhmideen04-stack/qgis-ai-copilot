@@ -28,8 +28,9 @@ class AICopilotPlugin:
     def unload(self):
         if self.dock is not None:
             self.dock.shutdown()
-            self.iface.removeDockWidget(self.dock)
-            self.dock.deleteLater()
+            for dock in (self.dock.request_dock, self.dock):
+                self.iface.removeDockWidget(dock)
+                dock.deleteLater()
             self.dock = None
         if self.action is not None:
             self.iface.removePluginVectorMenu("&AI Copilot", self.action)
@@ -39,10 +40,17 @@ class AICopilotPlugin:
 
     def toggle_dock(self):
         if self.dock is None:
+            # Settings + chat: docked inside QGIS (right side by default, or where the user put it last time).
+            # Request bar: docked at the bottom, the input box centred.
             self.dock = AICopilotDockWidget(self.iface.mainWindow())
-            self.iface.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.dock)
-        elif self.dock.isVisible():
-            self.dock.hide()
+            self.iface.addDockWidget(self.dock.saved_area(), self.dock)
+            self.iface.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.dock.request_dock)
+            self.dock.restore_floating()
+            self.dock.set_panels_visible(True)
+            self.dock.prompt_input.setFocus()
             return
-        self.dock.show()
-        self.dock.raise_()
+        if self.dock.panels_visible():
+            self.dock.set_panels_visible(False)
+            return
+        self.dock.set_panels_visible(True)
+        self.dock.prompt_input.setFocus()
