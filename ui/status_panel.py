@@ -4,6 +4,8 @@ import time
 from qgis.PyQt.QtCore import QTimer
 from qgis.PyQt.QtWidgets import QFrame, QHBoxLayout, QLabel, QProgressBar, QVBoxLayout
 
+from ..core.i18n import dynamic, tr, tr_lines
+
 SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
 # Border and text colour for each stage
@@ -25,6 +27,7 @@ class StatusPanel(QFrame):
         super().__init__(parent)
         self.setFrameShape(QFrame.Shape.StyledPanel)
         self.setObjectName("AICopilotStatus")
+        dynamic(self)
 
         self.spinner_label = QLabel()
         self.spinner_label.setFixedWidth(16)
@@ -34,6 +37,8 @@ class StatusPanel(QFrame):
         self.detail_label.setWordWrap(True)
         self.detail_label.setStyleSheet("color: gray; font-size: 11px;")
 
+        for label in (self.spinner_label, self.stage_label, self.time_label, self.detail_label):
+            dynamic(label)
         self.bar = QProgressBar()
         self.bar.setMaximumHeight(8)
         self.bar.setTextVisible(False)
@@ -70,14 +75,14 @@ class StatusPanel(QFrame):
 
     def set_stage(self, kind, text, detail=None):
         color = STAGE_COLORS.get(kind, "#455a64")
-        self.stage_label.setText(f"<b style='color:{color}'>{text}</b>")
+        self.stage_label.setText(f"<b style='color:{color}'>{tr(text)}</b>")
         self.setStyleSheet(f"#AICopilotStatus {{ border: 1px solid {color}; border-radius: 6px; }}")
         self.bar.setStyleSheet(f"QProgressBar::chunk {{ background-color: {color}; }}")
         if detail is not None:
             self.set_detail(detail)
 
     def set_detail(self, text):
-        self.detail_label.setText(text)
+        self.detail_label.setText(tr_lines(text) if text else text)
         self.detail_label.setVisible(bool(text))
 
     def set_progress(self, percent):

@@ -11,6 +11,7 @@ from qgis.PyQt.QtWidgets import (QAbstractItemView, QDialog, QDialogButtonBox, Q
                                  QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox,
                                  QPushButton, QSplitter, QTextBrowser, QVBoxLayout)
 
+from ..core.i18n import tr, translate_tree
 from ..core.progress import report_status
 
 S = "ai_copilot"
@@ -114,6 +115,7 @@ def choose_data(title, items, message="", multi=True):
     buttons.rejected.connect(dialog.reject)
     layout.addWidget(buttons)
 
+    translate_tree(dialog)
     if dialog.exec() != QDialog.DialogCode.Accepted:
         print(f"User cancelled the choice: {title}")
         return [] if multi else None
@@ -139,12 +141,13 @@ def confirm_data(title, description="", url="", sample=None, question="Use this 
     browser.setOpenExternalLinks(True)
     browser.setHtml(_item_html({"title": title, "url": url, "description": description, "sample": sample}))
     layout.addWidget(browser, 1)
-    label = QLabel(f"<b>{_esc(question)}</b>")
+    label = QLabel(f"<b>{_esc(tr(question))}</b>")
     layout.addWidget(label)
     buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Yes | QDialogButtonBox.StandardButton.No)
     buttons.accepted.connect(dialog.accept)
     buttons.rejected.connect(dialog.reject)
     layout.addWidget(buttons)
+    translate_tree(dialog)
     ok = dialog.exec() == QDialog.DialogCode.Accepted
     print(f"User {'ACCEPTED' if ok else 'REJECTED'} the data: {title}")
     return ok
@@ -271,6 +274,7 @@ def pick_layers(layers, checked_ids=(), parent=None):
     buttons.rejected.connect(dialog.reject)
     layout.addWidget(buttons)
 
+    translate_tree(dialog)
     if dialog.exec() != QDialog.DialogCode.Accepted:
         return None
     return [list_widget.item(i).data(Qt.ItemDataRole.UserRole) for i in range(list_widget.count())
@@ -352,7 +356,7 @@ def show_history(archive, parent=None):
             fill()
 
     def clear_all():
-        if QMessageBox.question(dialog, "AI Copilot", "Delete the whole request archive?",
+        if QMessageBox.question(dialog, "AI Copilot", tr("Delete the whole request archive?"),
                                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                                 QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes:
             archive.clear()
@@ -372,5 +376,6 @@ def show_history(archive, parent=None):
     row.addWidget(close)
     layout.addLayout(row)
     fill()
+    translate_tree(dialog)
     dialog.exec()
     return chosen["prompt"]
